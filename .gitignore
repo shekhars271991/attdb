@@ -7,6 +7,7 @@ redis/
 # Build artifacts
 build/
 cmake-build-*/
+attentiondb-server/build/
 *.o
 *.a
 *.so
