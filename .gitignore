@@ -1,0 +1,32 @@
+# Reference codebases (not part of AttentionDB)
+lmcache/
+aerospike-server/
+Mooncake/
+redis/
+
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.whl
+
+# OS
+.DS_Store
+Thumbs.db
