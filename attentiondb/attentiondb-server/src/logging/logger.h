@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -63,6 +64,8 @@ private:
     PeriodStats period_stats_;
     std::thread summary_thread_;
     std::atomic<bool> running_{false};
+    std::mutex stop_mu_;
+    std::condition_variable stop_cv_;
 };
 
 }  // namespace attentiondb

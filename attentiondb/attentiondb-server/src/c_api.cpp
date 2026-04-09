@@ -7,7 +7,7 @@
 
 using namespace attentiondb;
 
-struct attentiondb {
+struct attentiondb_handle {
     AttentionDBEngine engine;
 };
 
@@ -47,7 +47,7 @@ attentiondb_status_t attentiondb_open(const attentiondb_config_t* config,
         cfg = Config::Default();
     }
 
-    auto* h = new (std::nothrow) attentiondb();
+    auto* h = new (std::nothrow) attentiondb_handle();
     if (!h) return ATTENTIONDB_IO_ERROR;
 
     Status s = h->engine.open(cfg);

@@ -131,12 +131,15 @@ void CheckpointManager::start_periodic(ConcurrentHashMap& index) {
 
 void CheckpointManager::stop() {
     running_ = false;
+    stop_cv_.notify_all();
     if (periodic_thread_.joinable()) periodic_thread_.join();
 }
 
 void CheckpointManager::periodic_thread_fn(ConcurrentHashMap& index) {
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::seconds(config_.interval_s));
+        std::unique_lock<std::mutex> lock(stop_mu_);
+        stop_cv_.wait_for(lock, std::chrono::seconds(config_.interval_s),
+                          [this] { return !running_.load(); });
         if (!running_) break;
         if (dirty_.load(std::memory_order_relaxed)) {
             save(index);

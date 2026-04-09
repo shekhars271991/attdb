@@ -215,11 +215,12 @@ int BlobStore::open_segment_fd(const std::string& path, bool create) {
     flags |= O_DIRECT;
 #endif
     int fd = ::open(path.c_str(), flags, 0644);
+#ifdef __linux__
     if (fd < 0 && (flags & O_DIRECT)) {
-        // Retry without O_DIRECT (e.g., on tmpfs)
         flags &= ~O_DIRECT;
         fd = ::open(path.c_str(), flags, 0644);
     }
+#endif
     return fd;
 }
 

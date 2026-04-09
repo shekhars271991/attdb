@@ -1,0 +1,39 @@
+# AttentionDB engine config — g6.4xlarge benchmark
+# Mounted at /etc/attentiondb/attentiondb.yaml inside the container.
+#
+# g6.4xlarge: 1× L4 24 GB, 16 vCPUs, 64 GB RAM, local NVMe ~600 GB
+# Budget: 16 GB T1 DRAM → holds ~14 of 40 prefixes in-memory.
+# Remaining 26 prefixes served from local NVMe via io_uring (~300 µs).
+
+mode: local_only
+
+dram_cache:
+  enabled: true
+  size_bytes: 17179869184        # 16 GiB
+  size_classes:
+    - 65536                      # 64 KiB
+    - 131072                     # 128 KiB
+    - 262144                     # 256 KiB
+    - 524288                     # 512 KiB
+    - 1048576                    # 1 MiB
+    - 2097152                    # 2 MiB
+  hugepages: true
+  pinned_memory: true            # cudaMallocHost for zero-copy GPU DMA
+
+nvme_store:
+  enabled: true
+  paths:
+    - "/opt/dlami/nvme/attentiondb"
+  segment_size: 1073741824       # 1 GiB
+  io_engine: io_uring
+  gc_enabled: true
+
+write_buffer:
+  size_bytes: 268435456          # 256 MiB
+  flush_interval_ms: 10
+
+admission:
+  min_recompute_cost: 0          # accept all during benchmark
+
+checkpoint:
+  interval_s: 30

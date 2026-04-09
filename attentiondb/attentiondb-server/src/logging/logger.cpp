@@ -82,13 +82,18 @@ void Logger::start_periodic_summary() {
 
 void Logger::stop() {
     running_ = false;
+    stop_cv_.notify_all();
     if (summary_thread_.joinable()) summary_thread_.join();
 }
 
 void Logger::periodic_summary_fn() {
     while (running_) {
-        std::this_thread::sleep_for(
-            std::chrono::seconds(config_.periodic_summary_interval_s));
+        {
+            std::unique_lock<std::mutex> lock(stop_mu_);
+            stop_cv_.wait_for(lock,
+                std::chrono::seconds(config_.periodic_summary_interval_s),
+                [this] { return !running_.load(); });
+        }
         if (!running_) break;
 
         auto& s = period_stats_;

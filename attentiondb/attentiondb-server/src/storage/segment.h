@@ -20,7 +20,7 @@ struct SegmentHeader {
     uint32_t entry_count;
     uint32_t live_count;
     uint32_t checksum;
-    uint8_t  _reserved[4096 - 28];
+    uint8_t  _reserved[4096 - 32];
 };
 #pragma pack(pop)
 
@@ -34,7 +34,7 @@ struct BlobEntryHeader {
     uint32_t checksum;         // CRC32C of blob data
     uint64_t sequence;         // Monotonically increasing write sequence
     uint8_t  key_data[30];     // Inline StorageKey (packed, 30 bytes)
-    uint8_t  _reserved[14];
+    uint8_t  _reserved[10];
 };
 #pragma pack(pop)
 

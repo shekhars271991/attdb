@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <sys/types.h>
 
 namespace attentiondb {
 

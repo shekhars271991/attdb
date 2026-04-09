@@ -1,0 +1,52 @@
+# Dockerfile.benchmark — vLLM + LMCache + AttentionDB (single GPU node)
+#
+# Build context: attentiondb-server/
+#   docker build -f Dockerfile.benchmark -t vllm-attentiondb:latest .
+
+FROM lmcache/vllm-openai:v0.4.2
+
+# ── Build dependencies ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        liburing-dev \
+        libjemalloc-dev \
+    && pip install --no-cache-dir cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Copy source ─────────────────────────────────────────────────
+WORKDIR /build/attentiondb-server
+COPY CMakeLists.txt .
+COPY third_party/ third_party/
+COPY src/ src/
+COPY python/ python/
+
+# ── Compile with CUDA + Python bindings ─────────────────────────
+RUN cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DATTENTIONDB_CUDA=ON \
+        -DATTENTIONDB_BUILD_PYTHON=ON \
+        -DATTENTIONDB_BUILD_TESTS=OFF \
+        -DATTENTIONDB_BUILD_BENCH=OFF \
+    && cmake --build build -j"$(nproc)"
+
+# ── Install into the Python path ────────────────────────────────
+RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    cp build/_attentiondb*.so "$SITE/" && \
+    cp -r python/attentiondb "$SITE/attentiondb"
+
+RUN cp build/libattentiondb.so /usr/local/lib/ && ldconfig
+
+# ── Verify ──────────────────────────────────────────────────────
+RUN python3 -c "\
+import importlib, sys; \
+mod = importlib.import_module('_attentiondb'); \
+print('_attentiondb OK:', [x for x in dir(mod) if not x.startswith('_')]); \
+from attentiondb.lmcache_adapter import AttentionDBConnectorAdapter; \
+print('lmcache_adapter OK'); \
+"
+
+# ── Clean build tree ────────────────────────────────────────────
+RUN rm -rf /build
+
+WORKDIR /

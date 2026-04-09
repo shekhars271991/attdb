@@ -1,0 +1,20 @@
+# LMCache config for AttentionDB benchmark
+# Mounted at /etc/lmcache/config.yaml inside the container.
+#
+# AttentionDB replaces both LMCache's local_cpu tier and the remote
+# Aerospike tier with a unified in-process engine.  LMCache's own CPU
+# cache is disabled (local_cpu: false) because AttentionDB manages its
+# own DRAM tier (T1, 16 GiB pinned memory).
+
+chunk_size: 8
+local_cpu: false
+max_local_cpu_size: 0
+
+remote_url: "attentiondb:///etc/attentiondb/attentiondb.yaml"
+remote_serde: "naive"
+remote_storage_plugins: ["attentiondb"]
+
+extra_config:
+  remote_storage_plugin.attentiondb.module_path: attentiondb.lmcache_adapter
+  remote_storage_plugin.attentiondb.class_name: AttentionDBConnectorAdapter
+  save_chunk_meta: true

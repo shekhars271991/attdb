@@ -1,3 +1,22 @@
+// AttentionDB Concurrent HashMap Benchmark
+//
+// Measures raw throughput of the lock-free index that maps StorageKey ->
+// IndexEntry, backed by libcuckoo's cuckoohash_map. This is the hot path
+// for every get/put/contains operation in the engine.
+//
+// BM_HashMapInsert: Sequential insert of unique keys into a pre-sized map
+//   (1M buckets). Measures single-threaded upsert cost including hashing
+//   (xxHash) and bucket-level locking. Establishes the per-key overhead
+//   that bounds write-path indexing.
+//
+// BM_HashMapFind: Point lookups against 100K pre-loaded entries, cycling
+//   keys round-robin so every lookup is a hit. Measures the latency of
+//   hash + bucket probe + value copy under zero contention.
+//
+// BM_HashMapContains: Same workload as Find but only checks existence
+//   (no value copy). Isolates the hash + probe cost from the value
+//   materialization cost, showing the overhead delta of contains vs find.
+
 #include <benchmark/benchmark.h>
 
 #include "index/concurrent_hashmap.h"

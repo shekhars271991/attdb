@@ -46,11 +46,12 @@ void SlabAllocator::init_classes(const DramCacheConfig& config) {
     // Simple strategy: equal bytes per class
     size_t bytes_per_class = total / num_classes;
 
-    classes_.resize(num_classes);
+    classes_.reserve(num_classes);
     backing_allocations_.resize(num_classes);
 
     for (size_t i = 0; i < num_classes; ++i) {
-        auto& sc = classes_[i];
+        classes_.emplace_back();
+        auto& sc = classes_.back();
         sc.slot_size = size_classes[i];
         sc.num_slots = bytes_per_class / sc.slot_size;
         if (sc.num_slots == 0) sc.num_slots = 1;
@@ -60,7 +61,6 @@ void SlabAllocator::init_classes(const DramCacheConfig& config) {
         backing_allocations_[i] = sc.base;
         total_bytes_ += region_size;
 
-        // Initialize free list with all slots
         sc.free_list.resize(sc.num_slots);
         std::iota(sc.free_list.begin(), sc.free_list.end(), 0);
     }

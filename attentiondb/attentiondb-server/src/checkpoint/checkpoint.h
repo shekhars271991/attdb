@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,6 +68,8 @@ private:
     std::thread periodic_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> dirty_{false};
+    std::mutex stop_mu_;
+    std::condition_variable stop_cv_;
 
     std::atomic<uint64_t> last_entries_{0};
     std::atomic<uint64_t> last_duration_ms_{0};

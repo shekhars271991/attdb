@@ -1,5 +1,8 @@
 include(FetchContent)
 
+# Allow older cmake_minimum_required in fetched deps (CMake 4.x compat)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "")
+
 # ── libcuckoo (header-only concurrent hash map) ─────────────────────────────
 
 FetchContent_Declare(
@@ -15,7 +18,7 @@ FetchContent_MakeAvailable(libcuckoo)
 FetchContent_Declare(
     xxHash
     GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
-    GIT_TAG        v0.8.2
+    GIT_TAG        v0.8.3
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  cmake_unofficial
 )
@@ -26,7 +29,7 @@ FetchContent_MakeAvailable(xxHash)
 FetchContent_Declare(
     yaml-cpp
     GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-    GIT_TAG        0.8.0
+    GIT_TAG        yaml-cpp-0.9.0
     GIT_SHALLOW    TRUE
 )
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -60,7 +63,7 @@ if(ATTENTIONDB_BUILD_PYTHON)
     FetchContent_Declare(
         pybind11
         GIT_REPOSITORY https://github.com/pybind/pybind11.git
-        GIT_TAG        v2.12.0
+        GIT_TAG        v3.0.3
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(pybind11)
@@ -72,7 +75,7 @@ if(ATTENTIONDB_BUILD_TESTS)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.14.0
+        GIT_TAG        v1.17.0
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(googletest)
@@ -84,7 +87,7 @@ if(ATTENTIONDB_BUILD_BENCH)
     FetchContent_Declare(
         benchmark
         GIT_REPOSITORY https://github.com/google/benchmark.git
-        GIT_TAG        v1.8.4
+        GIT_TAG        v1.9.5
         GIT_SHALLOW    TRUE
     )
     set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)

@@ -59,11 +59,19 @@ public:
 
 private:
     struct SizeClass {
-        size_t slot_size;
-        size_t num_slots;
-        uint8_t* base;             // Start of the memory region for this class
+        size_t slot_size = 0;
+        size_t num_slots = 0;
+        uint8_t* base = nullptr;
         std::vector<uint32_t> free_list;
         mutable std::mutex mu;
+
+        SizeClass() = default;
+        SizeClass(SizeClass&& o) noexcept
+            : slot_size(o.slot_size), num_slots(o.num_slots),
+              base(o.base), free_list(std::move(o.free_list)) {}
+        SizeClass& operator=(SizeClass&&) = delete;
+        SizeClass(const SizeClass&) = delete;
+        SizeClass& operator=(const SizeClass&) = delete;
     };
 
     void init_classes(const DramCacheConfig& config);

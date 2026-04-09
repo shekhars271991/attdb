@@ -46,7 +46,7 @@ public:
     void clear();
 
 private:
-    MapType map_;
+    mutable MapType map_;
 };
 
 }  // namespace attentiondb

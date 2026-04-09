@@ -73,7 +73,7 @@ typedef struct attentiondb_config {
     const char* config_yaml;   /* Inline YAML string, or NULL */
 } attentiondb_config_t;
 
-typedef struct attentiondb attentiondb_t;
+typedef struct attentiondb_handle attentiondb_t;
 
 /* Lifecycle */
 attentiondb_status_t attentiondb_open(
