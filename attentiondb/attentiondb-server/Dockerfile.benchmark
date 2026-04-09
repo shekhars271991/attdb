@@ -37,6 +37,9 @@ RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
 
 RUN cp build/libattentiondb.so /usr/local/lib/ && ldconfig
 
+# jemalloc must be preloaded to avoid "cannot allocate memory in static TLS block"
+ENV LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2
+
 # ── Verify ──────────────────────────────────────────────────────
 RUN python3 -c "\
 import importlib, sys; \
