@@ -28,6 +28,9 @@ __pycache__/
 dist/
 *.whl
 
+# Benchmark scripts (contain env-specific paths and secrets references)
+attentiondb/attentiondb-server/bench/kv_offloading_attentiondb_benchmark.sh
+
 # OS
 .DS_Store
 Thumbs.db

@@ -8,10 +8,10 @@ FROM lmcache/vllm-openai:v0.4.2
 # ── Build dependencies ──────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         git \
         liburing-dev \
         libjemalloc-dev \
-    && pip install --no-cache-dir cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Copy source ─────────────────────────────────────────────────
