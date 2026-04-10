@@ -112,11 +112,16 @@ class AttentionDBConnector(RemoteConnector):
 
         model_id = _hash_u64(model_name) if isinstance(model_name, str) else model_name
 
+        if isinstance(chunk_hash, int):
+            chunk_hash_u64 = chunk_hash & 0xFFFFFFFFFFFFFFFF
+        else:
+            chunk_hash_u64 = _hash_u64(str(chunk_hash))
+
         return self._adb.StorageKey(
-            model_id=model_id,
+            model_id=model_id & 0xFFFFFFFFFFFFFFFF,
             tenant_id=0,
-            chunk_hash=chunk_hash if isinstance(chunk_hash, int) else _hash_u64(str(chunk_hash)),
-            layer_group_id=worker_id,
+            chunk_hash=chunk_hash_u64,
+            layer_group_id=worker_id & 0xFFFFFFFFFFFFFFFF,
             chunk_index=0,
         )
 
