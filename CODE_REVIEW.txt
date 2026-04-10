@@ -1,0 +1,430 @@
+================================================================================
+                    AttentionDB — Code Review Report
+                    Date: 2026-04-10
+================================================================================
+
+SCOPE
+-----
+Reviewed all source files under attentiondb/attentiondb-server/ and
+externalbench/, covering:
+  - 31 C++ source/header files (src/, bench/, tests/)
+  -  3 Python modules (python/attentiondb/)
+  -  2 CMakeLists.txt files
+  -  1 Dockerfile
+  -  2 shell benchmark scripts
+  -  2 YAML config files
+
+Severities: CRITICAL > HIGH > MEDIUM > LOW > INFO
+
+================================================================================
+ 1. CRITICAL FINDINGS
+================================================================================
+
+1.1  SECRET COMMITTED TO REPO — HF_TOKEN
+     File: attentiondb-server/bench/kv_offloading_attentiondb_benchmark.sh:87
+     A literal Hugging Face token (hf_...) is hardcoded.  Treat as
+     compromised — rotate immediately, scrub from git history, and use an
+     environment variable or secrets manager instead.
+
+1.2  LICENSE / SIGNATURE MATERIAL IN REPO — Aerospike EE features.conf
+     File: externalbench/kv_offloading_aerospike_benchmark.sh:222-259
+     Aerospike Enterprise Edition license/signature content is embedded
+     inline.  Should be read from a non-committed, secure file path.
+
+1.3  GC SEGMENT LIFECYCLE BUG — Use-After-Close
+     File: src/storage/blob_store.cpp:482-528
+     gc_compact_segment() closes the segment FD, truncates/removes the file,
+     and zeros fields but does NOT remove the segment from segments_ or fix
+     active_segment_.  Concurrent readers/writers can use a closed FD;
+     active_segment_ may dangle.
+
+1.4  SHORT I/O READ TREATED AS FULL READ — Silent Data Corruption
+     File: src/storage/blob_store.cpp:258-300
+     sync_read/sync_write (posix/uring) can return a positive byte count
+     less than len.  read() only checks ret < 0.  A short read interpreted
+     as a full BlobEntryHeader/blob is undefined behavior and silent
+     corruption.  Same pattern in open() (57-58) and GC (491-506).
+
+1.5  ORPHAN INDEX ENTRIES
+     File: src/engine.cpp:113-125, 158
+     If neither T1 nor T2 stores a blob (e.g. T2 write fails after T1 miss),
+     the code still upserts an index row.  After memset, tier is 0 (invalid
+     enum value), so get() treats it as a miss but the key "exists" for
+     contains/checkpoint/eviction — orphan entries and inconsistent behavior.
+
+1.6  size_t → uint32_t TRUNCATION
+     File: src/engine.cpp:125-126, 189-191
+     len is size_t but entry.length is uint32_t.  Values > 2^32-1 silently
+     truncate, causing length mismatch between index and blob store.
+
+1.7  entry_disk_size OVERFLOW
+     File: src/storage/segment.h:47-50
+     kEntryHeaderSize + blob_size can overflow size_t for large blob_size,
+     yielding an undersized allocation and buffer overrun in blob_store.cpp.
+
+1.8  CUDA FALLBACK / DEALLOCATOR MISMATCH — Heap Corruption Risk
+     File: src/memory/slab_allocator.cpp:69-111
+     If ATTENTIONDB_CUDA is set and cudaMallocHost fails, alloc_backing
+     falls through to mmap/aligned_alloc, but free_backing still calls
+     cudaFreeHost when use_pinned_ is true.  Wrong deallocator = heap
+     corruption.
+
+1.9  NULL DEREFERENCE ON active_block_
+     File: src/storage/blob_store.cpp:150-255
+     After active_block_ = acquire_block(lock), the pointer may be nullptr
+     when flush_running_ is false and the pool is empty.  Subsequent use of
+     active_block_->capacity, pos, etc. is a null dereference.
+
+================================================================================
+ 2. HIGH-SEVERITY FINDINGS
+================================================================================
+
+2.1  DRAM SLAB LEAKS ON DELETE / EVICT
+     File: src/engine.cpp:245-251, 300-334
+     T1 data is stored as a raw pointer in entry.address.  del() does not
+     free the slab slot; evict_if_needed() erases or demotes without calling
+     SlabAllocator::free.  DRAM leaks for deleted/evicted T1 entries.
+
+2.2  DATA RACE ON SEGMENT FIELDS
+     File: src/storage/blob_store.cpp:249-253 vs 274-283
+     active_segment_->write_offset (and related counters) is updated under
+     block_mu_ in the buffered write path, while read() uses segments_mu_
+     for segment iteration.  Different mutexes protecting the same fields =
+     data race under concurrent API use.
+
+2.3  FLUSH ERRORS SILENTLY IGNORED
+     File: src/storage/blob_store.cpp:335-387
+     flush_thread_fn ignores sync_write return value.  Failed/partial flush
+     is not surfaced; in-memory state diverges from disk.
+
+2.4  UNCHECKED SEGMENT FD ON CREATE
+     File: src/storage/blob_store.cpp:400-418
+     create_new_segment does not verify open_segment_fd success (fd < 0).
+     Bad path can still set active_segment_ and append data.
+
+2.5  UNHANDLED EXCEPTIONS IN BLOB STORE OPEN
+     File: src/storage/blob_store.cpp:42-72
+     directory_iterator and stoul(stem.substr(8)) can throw
+     (filesystem_error, invalid_argument, out_of_range); fstat return not
+     checked.  Unhandled exceptions on bad paths or corrupt names.
+
+2.6  CHECKPOINT SAVE — UNCHECKED STREAM WRITES
+     File: src/checkpoint/checkpoint.cpp:22-78
+     Stream write/seekp success not checked before rename.  A corrupt or
+     partial tmp file could replace the good checkpoint.
+
+2.7  CHECKPOINT LOAD — UNTRUSTED entry_count → DoS
+     File: src/checkpoint/checkpoint.cpp:81-123
+     hdr.entry_count is trusted for the loop bound.  A malicious or
+     corrupted file with a huge value causes massive allocations (reserve +
+     loop) — memory exhaustion / DoS.  No cap or file-size cross-check.
+
+2.8  CONFIG ParseSize OVERFLOW
+     File: src/core/config.cpp:12-24
+     Digit accumulation has no overflow guard; huge numeric strings wrap
+     size_t silently.
+
+2.9  UNPINNED MOVING BRANCH — libcuckoo
+     File: attentiondb-server/third_party/CMakeLists.txt:8-12
+     libcuckoo uses GIT_TAG master.  master moves; fetches are
+     non-reproducible and can introduce sudden breakages or ABI changes.
+
+2.10 NON-PORTABLE LD_PRELOAD PATH IN DOCKER
+     File: attentiondb-server/Dockerfile.benchmark:41
+     ENV LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 is x86_64-only.
+     On arm64/aarch64 images this path is wrong.
+
+2.11 NO STRICT SHELL MODE IN BENCHMARK SCRIPTS
+     File: attentiondb-server/bench/kv_offloading_attentiondb_benchmark.sh
+     File: externalbench/kv_offloading_aerospike_benchmark.sh
+     Neither script uses set -euo pipefail.  Failures in git, docker, cmake
+     etc. are silently ignored, producing partial/misleading runs.
+
+2.12 DESTRUCTIVE RAW-DEVICE dd
+     File: externalbench/kv_offloading_aerospike_benchmark.sh:170-171
+     sudo dd if=/dev/zero of=/dev/nvme1n1 — destructive and device-
+     specific.  Wrong host or device causes catastrophic data loss.
+
+================================================================================
+ 3. MEDIUM-SEVERITY FINDINGS
+================================================================================
+
+ 3.1  engine.cpp:196-214 — On T2 read failure, *out_len may be left unset
+      while some paths update the index and return non-kOk.  Callers that
+      only check status may still read *out_len.
+
+ 3.2  engine.cpp:225-228 — get_latency_max_us updated with relaxed
+      load/store; two threads can overwrite so the stored "max" is not a
+      true max.
+
+ 3.3  logging/logger.cpp:116-128 — Comment says "p99_get_latency_us" but
+      value is max, not p99 — misleading metrics.
+
+ 3.4  logging/logger.cpp:49-60 — event/json_fields passed to fprintf
+      without escaping; untrusted strings break JSON.  Log injection risk.
+
+ 3.5  c_api.cpp:101-109 — attentiondb_delete ignores Status from del();
+      batch callers cannot tell kNotFound vs kOk.
+
+ 3.6  c_api.cpp:131-148 — attentiondb_batched_get does not verify each
+      bufs[i] != nullptr.
+
+ 3.7  c_api.cpp:28-34 — entry_type cast from uint8_t to EntryType without
+      validation; invalid values are undefined behavior.
+
+ 3.8  eviction/cw_slru.cpp:10-44 — on_access does nothing if the key is
+      in neither list.  If index and SLRU diverge, eviction metadata stays
+      wrong.
+
+ 3.9  memory/slab_allocator.cpp:32-37 — init_classes throws
+      std::invalid_argument / std::bad_alloc; Engine::open does not catch —
+      terminate on bad config.
+
+ 3.10 storage/blob_store.cpp:390-397 — mark_dead does not check that the
+      segment ID was found; live_count can underflow (uint32_t wrap).
+
+ 3.11 storage/blob_store.cpp:535-548 — stats() live_bytes uses
+      write_offset * ratio — rough estimate, not actual live bytes;
+      misleading.
+
+ 3.12 checkpoint/checkpoint.cpp:50-62 — XXH32_createState failure not
+      checked (OOM edge case).
+
+ 3.13 engine.cpp:163-165 — Every successful put builds a std::string for
+      debug log — avoidable allocation on hot path.
+
+ 3.14 third_party/CMakeLists.txt:54-58 — If liburing is missing on Linux,
+      only a warning is printed, but uring_engine.h includes <liburing.h>
+      unconditionally on Linux.  Configure succeeds, compile fails.
+
+ 3.15 CMakeLists.txt:38-43 — Using pthread directly is less portable than
+      find_package(Threads REQUIRED) + Threads::Threads.
+
+ 3.16 CMakeLists.txt:61-65 — c_api.cpp compiled in both attentiondb_core
+      (static) and attentiondb (shared) libraries.  Duplicate compilation
+      units; fragile linker behavior.
+
+ 3.17 Project-wide — No -Wall -Wextra -Wpedantic compiler warnings
+      enabled in any CMake target.
+
+ 3.18 storage_key.h:7 — Pulls in <xxhash.h> for StorageKeyHash; any TU
+      that only needs StorageKey for layout still pays for xxhash.
+
+ 3.19 index/concurrent_hashmap.h:8 — Public typedef MapType leaks
+      libcuckoo into the API surface.
+
+ 3.20 engine.h:7-17 — Aggregates many subsystem headers; every includer
+      drags the full graph.  Consider forward declarations or pimpl.
+
+ 3.21 bench/kv_offloading_attentiondb_benchmark.sh:151-158 — Rewrites
+      /etc/docker/daemon.json via one-liner with no backup or merge
+      strategy; destructive.
+
+ 3.22 bench/config/lmcache.yaml:4-7 vs 10-11 — Comment says local_cpu is
+      disabled (false), but the file sets local_cpu: true.  Misleading.
+
+ 3.23 Python backend.py:111-115 — except RuntimeError: pass in
+      batched_submit_put_task swallows ALL RuntimeErrors, not just
+      admission/backpressure.  Other failures silently dropped.
+
+ 3.24 Python lmcache_adapter.py:177-179 — except Exception in _get_sync
+      logs and returns None, conflating real errors with cache miss.
+
+ 3.25 Python lmcache_adapter.py:212-215 — except RuntimeError: pass in
+      _put_sync same pattern: any RuntimeError swallowed without logging.
+
+ 3.26 Python lmcache_adapter.py:130-138, 181-182 — run_in_executor runs
+      synchronous _engine methods on the default thread pool.  If C++
+      Engine is not safe for concurrent use, overlapping calls can race.
+
+ 3.27 Python lmcache_adapter.py:148-155 — RemoteMetadata.deserialize on
+      data from storage; if blob store is writable by untrusted parties,
+      deserialization is a trust-boundary concern.
+
+ 3.28 externalbench/kv_offloading_aerospike_benchmark.sh:126 — Hardcoded
+      private IP AEROSPIKE_HOST="172.31.41.223".
+
+ 3.29 bench/bench_engine.cpp:61-64 — engine.put return value ignored in
+      benchmark; failed puts still counted in throughput metrics.
+
+ 3.30 bench/bench_hashmap.cpp:26-36 — Unbounded inserts with fresh key
+      every iteration; map resizes cause non-i.i.d. latency.
+
+================================================================================
+ 4. LOW-SEVERITY FINDINGS
+================================================================================
+
+ 4.1  storage/blob_store.h:125 — flushing_block_ is never used (dead
+      member).
+
+ 4.2  core/status.cpp:1-4 — Placeholder translation unit; exists only to
+      "satisfy the build".
+
+ 4.3  engine.cpp:46-48 — Checkpoint dir defaults to
+      /tmp/attentiondb_checkpoint when NVMe disabled; magic path.
+
+ 4.4  engine.cpp:19 — Index 1 << 20 expected entries is a hardcoded
+      sizing choice (config has no index size hook).
+
+ 4.5  admission/admission.cpp:20-37 — 0.7 / 0.9 / 0.2 thresholds are
+      magic numbers; not tied to AdmissionConfig.
+
+ 4.6  storage/gds_engine.h:7-21 — Stub engine; config can set "gds" in
+      YAML but BlobStore only chooses uring vs posix.  Config/impl drift.
+
+ 4.7  core/config.cpp:93-98 — Missing file returns Default() silently;
+      callers may think the file was loaded.
+
+ 4.8  core/index_entry.h:3 — #include <atomic> is unused in this header.
+
+ 4.9  segment.h:31-36 — Hard-codes key_data[30] without including
+      storage_key.h or a static_assert tying the two sizes together.
+
+ 4.10 engine.h:58-63 — put/get/del return Status but contains returns bool;
+      inconsistent error/contract story.
+
+ 4.11 engine.h:65 — stats() is non-const; implementation appears read-only.
+
+ 4.12 c_api.h:73-124 — Pointers have no documented nullability or
+      lifetime.
+
+ 4.13 engine.h:49-50 — Move operations not explicitly deleted or
+      defaulted; implicit move of opened_ engine is a footgun.
+
+ 4.14 Python backend.py:8 — Unused import: List (hints use lowercase list).
+
+ 4.15 Python lmcache_adapter.py:25 — Unused import: Optional.
+
+ 4.16 Python backend.py/lmcache_adapter.py — _hash_u64 is copy-pasted
+      between both files; drift risk.
+
+ 4.17 Python backend.py vs lmcache_adapter.py — Inconsistent chunk_hash
+      normalization: backend uses chunk_hash as-is when int;
+      lmcache_adapter masks with & 0xFFFFFFFFFFFFFFFF.
+
+ 4.18 Python backend.py:36 — config: object = None; should be
+      Optional[<concrete type>].
+
+ 4.19 Python: Multiple functions/parameters lack type annotations across
+      both backend.py and lmcache_adapter.py.
+
+ 4.20 bench/bench_engine.cpp:32-42, 55-58, 82-86 — Many magic numbers
+      (64MiB DRAM, segment size, recompute_cost = 500, etc.) without
+      named constants.
+
+ 4.21 test_blob_store.cpp:80-94 (MarkDead) — Incomplete test: stats are
+      fetched but no EXPECT_* assertion; test always passes.
+
+ 4.22 test_eviction.cpp:97-113 (ProtectedOverflowDemotes) — Comment says
+      protected should not exceed 1 but assertion allows <= 2; weakened
+      guarantee.
+
+ 4.23 test_engine.cpp — No tests for get with undersized buffer, del on
+      missing key, double open, invalid config, or concurrent access.
+
+ 4.24 test_blob_store.cpp — No tests for invalid BlobLocation, empty
+      write, GC path, or io_uring engine.
+
+ 4.25 test_checkpoint.cpp — No tests for corrupt file, partial write,
+      permission errors, or concurrent save.
+
+ 4.26 Tests use getpid() without #include <unistd.h>; relies on
+      transitive includes.
+
+ 4.27 Dockerfile.benchmark:9-15 — No apt version pins; builds not
+      reproducible across time.
+
+ 4.28 third_party/CMakeLists.txt:42-50 — When no system jemalloc found,
+      empty INTERFACE library used so build links, but runtime allocator
+      behavior differs.
+
+ 4.29 CMakeLists.txt — No CMake options for sanitizers (ASan/UBSan) or
+      coverage.
+
+================================================================================
+ 5. TEST COVERAGE SUMMARY
+================================================================================
+
+  Component              | Tested | Gaps
+  -----------------------+--------+----------------------------------------------
+  Engine (put/get/del)   | Basic  | Undersized buffer, missing key del, double
+                         |        | open, concurrent access, invalid config
+  BlobStore              | Basic  | Invalid BlobLocation, empty write, GC path,
+                         |        | io_uring engine, mark_dead assertions
+  Checkpoint             | Basic  | Corrupt file, partial write, permissions,
+                         |        | concurrent save, engine round-trip
+  SlabAllocator          | Basic  | Arena exhaustion, double free detection
+  CwSlru                 | Good   | Boundary values at exact thresholds
+  ConcurrentHashmap      | Good   | Per-key correctness under contention
+  Admission              | Good   | Exact boundary values (0.70, 0.90)
+  CoreTypes              | Good   | —
+
+================================================================================
+ 6. ARCHITECTURE OBSERVATIONS
+================================================================================
+
+6.1  The codebase is well-structured with clear separation of concerns:
+     engine, storage, memory, index, eviction, admission, checkpoint,
+     and logging modules.
+
+6.2  Good use of std::unique_ptr for subsystem ownership in the Engine
+     class.  Copy constructors correctly deleted where needed.
+
+6.3  The C API (c_api.h/cpp) provides a clean FFI boundary for the Python
+     bindings via pybind11.
+
+6.4  The two-tier architecture (T1 DRAM + T2 NVMe) with buffered async
+     writes and SLRU eviction is a solid design for KV-cache offloading.
+
+6.5  The checkpoint system enables crash recovery; however, error handling
+     on the save/load paths is incomplete (see findings 2.6, 2.7).
+
+6.6  The Python layer is thin and well-separated, serving as an adapter
+     for LMCache integration.
+
+================================================================================
+ 7. RECOMMENDED PRIORITY ACTIONS
+================================================================================
+
+  Priority 1 — Immediate (security / data integrity)
+  ---------------------------------------------------
+  [ ] Rotate and remove the HF_TOKEN from git history (finding 1.1)
+  [ ] Remove Aerospike license material from repo (finding 1.2)
+  [ ] Fix GC segment lifecycle: remove from segments_, handle
+      active_segment_ (finding 1.3)
+  [ ] Handle short reads/writes in blob_store I/O paths (finding 1.4)
+  [ ] Guard against orphan index entries on failed puts (finding 1.5)
+  [ ] Fix CUDA fallback / deallocator mismatch (finding 1.8)
+
+  Priority 2 — High (correctness / reliability)
+  -----------------------------------------------
+  [ ] Free slab slots on del/evict to prevent DRAM leaks (finding 2.1)
+  [ ] Fix data race on segment fields (different mutex scopes) (finding 2.2)
+  [ ] Check flush sync_write return values (finding 2.3)
+  [ ] Validate segment FD after open (finding 2.4)
+  [ ] Cap checkpoint entry_count to prevent DoS (finding 2.7)
+  [ ] Pin libcuckoo to a release tag (finding 2.9)
+  [ ] Add set -euo pipefail to all shell scripts (finding 2.11)
+
+  Priority 3 — Medium (robustness / maintainability)
+  ---------------------------------------------------
+  [ ] Enable -Wall -Wextra -Wpedantic in CMake (finding 3.17)
+  [ ] Add overflow guards to ParseSize and entry_disk_size (findings 1.6,
+      1.7, 2.8)
+  [ ] Validate entry_type in C API before casting to enum (finding 3.7)
+  [ ] Fix exception handling in blob_store open() (finding 2.5)
+  [ ] Fix misleading p99 label in logger metrics (finding 3.3)
+  [ ] Narrow exception handlers in Python (findings 3.23-3.25)
+  [ ] Add CMake sanitizer options for dev/CI (finding 4.29)
+
+  Priority 4 — Low (quality / hygiene)
+  -------------------------------------
+  [ ] Remove dead member flushing_block_ (finding 4.1)
+  [ ] Add type annotations to Python modules (finding 4.19)
+  [ ] Deduplicate _hash_u64 helper across Python files (finding 4.16)
+  [ ] Fix incomplete test assertions (findings 4.21, 4.22)
+  [ ] Add missing test scenarios per coverage summary (section 5)
+
+================================================================================
+ END OF REPORT
+================================================================================

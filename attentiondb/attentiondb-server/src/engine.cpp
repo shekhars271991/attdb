@@ -54,6 +54,24 @@ Status AttentionDBEngine::open(const Config& config) {
         char buf[64];
         snprintf(buf, sizeof(buf), "\"entries\":%zu", index_->size());
         logger_->info("checkpoint_loaded", buf);
+
+        // T1 DRAM entries from a previous process have stale pointers.
+        // Remove them; only T2 NVMe entries survive cold restart.
+        std::vector<StorageKey> stale_keys;
+        index_->iterate([&](const StorageKey& k, const IndexEntry& e) {
+            if (e.tier == static_cast<uint8_t>(Tier::kT1Dram))
+                stale_keys.push_back(k);
+            return true;
+        });
+        for (const auto& k : stale_keys) index_->erase(k);
+
+        if (!stale_keys.empty()) {
+            char buf2[128];
+            snprintf(buf2, sizeof(buf2),
+                     "\"removed\":%zu,\"remaining\":%zu",
+                     stale_keys.size(), index_->size());
+            logger_->info("checkpoint_scrubbed_t1", buf2);
+        }
     }
 
     checkpoint_->start_periodic(*index_);
