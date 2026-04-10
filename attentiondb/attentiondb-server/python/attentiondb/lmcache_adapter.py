@@ -166,7 +166,9 @@ class AttentionDBConnector(RemoteConnector):
                 logger.debug("Memory allocation failed during AttentionDB get")
                 return None
 
-            buf = memory_obj.byte_array
+            buf = memoryview(memory_obj.byte_array)
+            if buf.format != 'B':
+                buf = buf.cast('B')
             actual = min(len(data_bytes), len(buf))
             buf[:actual] = data_bytes[:actual]
             memory_obj = self.reshape_partial_chunk(memory_obj, actual)
