@@ -34,3 +34,4 @@ attentiondb/attentiondb-server/bench/kv_offloading_attentiondb_benchmark.sh
 # OS
 .DS_Store
 Thumbs.db
+secrets

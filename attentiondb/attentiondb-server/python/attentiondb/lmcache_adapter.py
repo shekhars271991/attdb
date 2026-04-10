@@ -1,9 +1,14 @@
 """LMCache remote storage plugin for AttentionDB.
 
 Implements the ConnectorAdapter + RemoteConnector pattern required by
-LMCache's remote_storage_plugins system.
+LMCache v0.4.2's remote_storage_plugins system.
 
-LMCache config:
+LMCache config (config.yaml):
+    chunk_size: 8
+    local_cpu: true
+    max_local_cpu_size: 1.0
+    remote_url: "attentiondb:///etc/attentiondb/attentiondb.yaml"
+    remote_serde: "naive"
     remote_storage_plugins: ["attentiondb"]
     extra_config:
       remote_storage_plugin.attentiondb.module_path: attentiondb.lmcache_adapter
@@ -20,16 +25,10 @@ import struct
 from typing import List, Optional
 from urllib.parse import urlparse
 
-from lmcache.v1.storage_backend.connector import (
-    ConnectorAdapter,
-    ConnectorContext,
-    extract_plugin_type,
-)
+from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorContext
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
 logger = logging.getLogger(__name__)
-
-PLUGIN_TYPE = "attentiondb"
 
 
 def _hash_u64(s: str) -> int:
@@ -60,43 +59,34 @@ class AttentionDBConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("attentiondb://")
 
-    def can_parse(self, url: str) -> bool:
-        if url.startswith(self.schema):
-            return True
-        if url.startswith("plugin://"):
-            pname = url[len("plugin://"):]
-            return extract_plugin_type(pname) == PLUGIN_TYPE
-        return False
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
-        logger.info("Creating AttentionDB connector")
+        logger.info("Creating AttentionDB connector for url=%s", context.url)
         config_path = _parse_config_path(context.url)
         return AttentionDBConnector(
-            context.loop,
-            context.local_cpu_backend,
-            context.config,
-            context.metadata,
+            config=context.config,
+            metadata=context.metadata,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
             config_path=config_path,
-            plugin_name=context.plugin_name,
         )
 
 
 class AttentionDBConnector(RemoteConnector):
-    """RemoteConnector implementation backed by the AttentionDB C++ engine.
+    """RemoteConnector backed by the AttentionDB C++ engine.
 
-    Stores KV cache chunks as raw blobs. When ``save_chunk_meta`` is
-    enabled, each blob is prefixed with LMCache's RemoteMetadata so
+    Stores KV cache chunks as raw blobs keyed by a hash of the
+    CacheEngineKey fields. When ``save_chunk_meta`` is enabled (default),
+    each blob is prefixed with LMCache's RemoteMetadata header so that
     partial-chunk recovery works on cold restart.
     """
 
     def __init__(
         self,
-        loop,
-        local_cpu_backend,
         config,
         metadata,
+        loop,
+        local_cpu_backend,
         config_path: str,
-        plugin_name=None,
     ):
         super().__init__(config, metadata)
 
@@ -130,15 +120,12 @@ class AttentionDBConnector(RemoteConnector):
             chunk_index=0,
         )
 
-    # ── Required abstract methods ────────────────────────────────
+    # ── Abstract method implementations ──────────────────────────
 
     async def exists(self, key) -> bool:
-        return await self.loop.run_in_executor(None, self._exists_sync, key)
+        return await self.loop.run_in_executor(None, self.exists_sync, key)
 
     def exists_sync(self, key) -> bool:
-        return self._exists_sync(key)
-
-    def _exists_sync(self, key) -> bool:
         sk = self._map_key(key)
         return self._engine.contains(sk)
 
