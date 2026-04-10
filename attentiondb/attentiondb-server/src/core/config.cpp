@@ -53,9 +53,9 @@ Config Config::LoadFromString(const std::string& yaml_content) {
     }
 
     if (auto adm = adb["admission"]) {
-        if (adm["min_recompute_cost"])
+        if (adm["min_recompute_cost"].IsDefined())
             cfg.admission.min_recompute_cost = adm["min_recompute_cost"].as<uint32_t>();
-        if (adm["base_threshold"])
+        if (adm["base_threshold"].IsDefined())
             cfg.admission.base_threshold = adm["base_threshold"].as<uint32_t>();
     }
 
