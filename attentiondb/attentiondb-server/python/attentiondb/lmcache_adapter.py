@@ -20,12 +20,37 @@ import struct
 from typing import List, Optional
 from urllib.parse import urlparse
 
+from lmcache.v1.storage_backend.connector import (
+    ConnectorAdapter,
+    ConnectorContext,
+    extract_plugin_type,
+)
+from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_TYPE = "attentiondb"
 
 
-class AttentionDBConnectorAdapter:
+def _hash_u64(s: str) -> int:
+    h = hashlib.sha256(s.encode()).digest()[:8]
+    return struct.unpack("<Q", h)[0]
+
+
+def _parse_config_path(remote_url: str) -> str:
+    parsed = urlparse(remote_url)
+    path = parsed.path
+    if not path:
+        raise ValueError(f"remote_url must contain a config path: {remote_url}")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"AttentionDB config not found at '{path}' "
+            f"(parsed from remote_url={remote_url})"
+        )
+    return path
+
+
+class AttentionDBConnectorAdapter(ConnectorAdapter):
     """ConnectorAdapter for AttentionDB.
 
     LMCache instantiates this with no arguments, then calls
@@ -33,40 +58,30 @@ class AttentionDBConnectorAdapter:
     """
 
     def __init__(self) -> None:
-        from lmcache.v1.storage_backend.connector import ConnectorAdapter
-
-        ConnectorAdapter.__init__(self, "attentiondb://")
+        super().__init__("attentiondb://")
 
     def can_parse(self, url: str) -> bool:
-        if url.startswith("attentiondb://"):
+        if url.startswith(self.schema):
             return True
         if url.startswith("plugin://"):
-            from lmcache.v1.storage_backend.connector import extract_plugin_type
-
             pname = url[len("plugin://"):]
             return extract_plugin_type(pname) == PLUGIN_TYPE
         return False
 
-    def create_connector(self, context):
-        from lmcache.v1.storage_backend.connector.base_connector import (
-            RemoteConnector,
-        )
-
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         logger.info("Creating AttentionDB connector")
-
         config_path = _parse_config_path(context.url)
-
         return AttentionDBConnector(
             context.loop,
             context.local_cpu_backend,
             context.config,
             context.metadata,
             config_path=config_path,
-            plugin_name=getattr(context, "plugin_name", None),
+            plugin_name=context.plugin_name,
         )
 
 
-class AttentionDBConnector:
+class AttentionDBConnector(RemoteConnector):
     """RemoteConnector implementation backed by the AttentionDB C++ engine.
 
     Stores KV cache chunks as raw blobs. When ``save_chunk_meta`` is
@@ -83,17 +98,11 @@ class AttentionDBConnector:
         config_path: str,
         plugin_name=None,
     ):
-        from lmcache.v1.storage_backend.connector.base_connector import (
-            RemoteConnector,
-        )
+        super().__init__(config, metadata)
 
-        RemoteConnector.__init__(self, config, metadata)
+        import _attentiondb
 
-        try:
-            import _attentiondb
-        except ImportError:
-            raise ImportError("attentiondb native module (_attentiondb) not found")
-
+        self._adb = _attentiondb
         self._engine = _attentiondb.Engine(config_path)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
@@ -106,18 +115,14 @@ class AttentionDBConnector:
 
     # ── Key mapping ──────────────────────────────────────────────
 
-    @staticmethod
-    def _map_key(key):
-        """Map a CacheEngineKey to an AttentionDB StorageKey."""
-        import _attentiondb
-
+    def _map_key(self, key):
         model_name = getattr(key, "model_name", "")
         chunk_hash = getattr(key, "chunk_hash", 0)
         worker_id = getattr(key, "worker_id", 0)
 
         model_id = _hash_u64(model_name) if isinstance(model_name, str) else model_name
 
-        return _attentiondb.StorageKey(
+        return self._adb.StorageKey(
             model_id=model_id,
             tenant_id=0,
             chunk_hash=chunk_hash if isinstance(chunk_hash, int) else _hash_u64(str(chunk_hash)),
@@ -183,7 +188,6 @@ class AttentionDBConnector:
         await self.loop.run_in_executor(None, self._put_sync, key, memory_obj)
 
     def _put_sync(self, key, memory_obj):
-        import _attentiondb
         from lmcache.v1.protocol import RemoteMetadata
 
         sk = self._map_key(key)
@@ -202,7 +206,7 @@ class AttentionDBConnector:
             else:
                 blob = data_buffer
 
-            opts = _attentiondb.PutOpts(
+            opts = self._adb.PutOpts(
                 num_tokens=0,
                 recompute_cost=0,
                 entry_type=0,
@@ -231,36 +235,3 @@ class AttentionDBConnector:
 
     async def ping(self) -> int:
         return 0 if self._engine is not None else 1
-
-
-# ── Helpers ──────────────────────────────────────────────────────
-
-def _hash_u64(s: str) -> int:
-    h = hashlib.sha256(s.encode()).digest()[:8]
-    return struct.unpack("<Q", h)[0]
-
-
-def _parse_config_path(remote_url: str) -> str:
-    parsed = urlparse(remote_url)
-    path = parsed.path
-    if not path:
-        raise ValueError(f"remote_url must contain a config path: {remote_url}")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(
-            f"AttentionDB config not found at '{path}' "
-            f"(parsed from remote_url={remote_url})"
-        )
-    return path
-
-
-# Register as a ConnectorAdapter subclass at import time so that
-# isinstance() checks pass even though we avoid a direct import
-# at class-definition time (which would fail if lmcache isn't installed).
-try:
-    from lmcache.v1.storage_backend.connector import ConnectorAdapter
-    from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-
-    ConnectorAdapter.register(AttentionDBConnectorAdapter)
-    RemoteConnector.register(AttentionDBConnector)
-except ImportError:
-    pass
