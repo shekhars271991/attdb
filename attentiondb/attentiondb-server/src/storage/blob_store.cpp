@@ -300,23 +300,22 @@ Status BlobStore::read(const BlobLocation& loc, void* buf, size_t buf_len,
 }
 
 const uint8_t* BlobStore::find_in_pending_blocks(const BlobLocation& loc) const {
-    // Check active block
-    if (active_block_ && active_block_->segment_id == loc.segment_id &&
-        loc.offset >= active_block_->segment_offset &&
-        loc.offset < active_block_->segment_offset + active_block_->pos) {
-        return active_block_->buf + (loc.offset - active_block_->segment_offset);
-    }
-
-    // Check flush queue (iterate via a copy -- queue is small, max pool_size entries)
-    auto q_copy = flush_queue_;
-    while (!q_copy.empty()) {
-        auto* wb = q_copy.front();
-        q_copy.pop();
-        if (wb->segment_id == loc.segment_id &&
+    auto check = [&](const WriteBlock* wb) -> const uint8_t* {
+        if (wb && wb->segment_id == loc.segment_id &&
             loc.offset >= wb->segment_offset &&
             loc.offset < wb->segment_offset + wb->pos) {
             return wb->buf + (loc.offset - wb->segment_offset);
         }
+        return nullptr;
+    };
+
+    if (auto* p = check(active_block_)) return p;
+    if (auto* p = check(flushing_block_)) return p;
+
+    auto q_copy = flush_queue_;
+    while (!q_copy.empty()) {
+        if (auto* p = check(q_copy.front())) return p;
+        q_copy.pop();
     }
 
     return nullptr;
@@ -357,6 +356,12 @@ void BlobStore::flush_thread_fn() {
             continue;
         }
 
+        // Mark as flushing so read-through can still find data in this block
+        {
+            std::lock_guard<std::mutex> lock(block_mu_);
+            flushing_block_ = block;
+        }
+
         // Single pwrite for the entire block -- the key optimization
         size_t write_size = align_up(block->pos, kAlignment);
         io_->sync_write(block->segment_fd, block->buf, write_size,
@@ -365,6 +370,7 @@ void BlobStore::flush_thread_fn() {
         // Return block to free pool
         {
             std::lock_guard<std::mutex> lock(block_mu_);
+            flushing_block_ = nullptr;
             free_pool_.push_back(block);
             free_cv_.notify_one();
         }

@@ -122,6 +122,7 @@ private:
     std::queue<WriteBlock*> flush_queue_;
     std::vector<WriteBlock*> free_pool_;
     std::vector<std::unique_ptr<WriteBlock>> all_blocks_;
+    WriteBlock* flushing_block_ = nullptr;  // block currently being pwritten
     std::thread flush_thread_;
     std::atomic<bool> flush_running_{false};
 
