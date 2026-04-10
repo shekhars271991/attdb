@@ -7,8 +7,8 @@
 # own DRAM tier (T1, 16 GiB pinned memory).
 
 chunk_size: 8
-local_cpu: false
-max_local_cpu_size: 0
+local_cpu: true
+max_local_cpu_size: 1.0
 
 remote_url: "attentiondb:///etc/attentiondb/attentiondb.yaml"
 remote_serde: "naive"
