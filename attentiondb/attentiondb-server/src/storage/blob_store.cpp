@@ -347,18 +347,15 @@ void BlobStore::flush_thread_fn() {
 
             block = flush_queue_.front();
             flush_queue_.pop();
-        }
 
-        if (!block || block->pos == 0) {
-            std::lock_guard<std::mutex> lock(block_mu_);
-            if (block) free_pool_.push_back(block);
-            free_cv_.notify_one();
-            continue;
-        }
+            if (!block || block->pos == 0) {
+                if (block) free_pool_.push_back(block);
+                free_cv_.notify_one();
+                continue;
+            }
 
-        // Mark as flushing so read-through can still find data in this block
-        {
-            std::lock_guard<std::mutex> lock(block_mu_);
+            // Atomically transition: queue -> flushing (no gap where block
+            // is invisible to find_in_pending_blocks)
             flushing_block_ = block;
         }
 
