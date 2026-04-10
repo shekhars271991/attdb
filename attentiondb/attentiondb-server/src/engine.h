@@ -15,7 +15,6 @@
 #include "logging/logger.h"
 #include "memory/slab_allocator.h"
 #include "storage/blob_store.h"
-#include "write_buffer/write_buffer.h"
 
 namespace attentiondb {
 
@@ -36,12 +35,6 @@ struct EngineStats {
     // Admission
     uint64_t admission_evaluated;
     uint64_t admission_rejected;
-
-    // Write buffer
-    uint64_t wb_submitted;
-    uint64_t wb_rejected;
-    uint64_t wb_flushed;
-    double wb_utilization;
 
     // Checkpoint
     uint64_t last_checkpoint_entries;
@@ -72,7 +65,6 @@ public:
     EngineStats stats();
 
 private:
-    void flush_write_batch(std::vector<WriteBuffer::PendingWrite>&& batch);
     void evict_if_needed();
     double storage_utilization() const;
     uint32_t compute_crc32(const void* data, size_t len);
@@ -84,7 +76,6 @@ private:
     std::unique_ptr<CwSlru> t1_eviction_;
     std::unique_ptr<CwSlru> t2_eviction_;
     std::unique_ptr<AdmissionControl> admission_;
-    std::unique_ptr<WriteBuffer> write_buffer_;
     std::unique_ptr<CheckpointManager> checkpoint_;
     std::unique_ptr<Logger> logger_;
     bool opened_ = false;

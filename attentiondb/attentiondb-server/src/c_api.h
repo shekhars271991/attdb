@@ -57,12 +57,6 @@ typedef struct {
     uint64_t admission_evaluated;
     uint64_t admission_rejected;
 
-    /* Write buffer */
-    uint64_t wb_submitted;
-    uint64_t wb_rejected;
-    uint64_t wb_flushed;
-    double   wb_utilization;
-
     /* Checkpoint */
     uint64_t last_checkpoint_entries;
     uint64_t last_checkpoint_duration_ms;

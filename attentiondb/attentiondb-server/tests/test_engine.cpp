@@ -1,9 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cstring>
 #include <filesystem>
-#include <thread>
 
 #include "engine.h"
 
@@ -36,10 +34,7 @@ protected:
         cfg.nvme_store.io_engine = "posix";
         cfg.nvme_store.gc_enabled = false;
 
-        cfg.write_buffer.size_bytes = 1 * 1024 * 1024;
-        cfg.write_buffer.flush_interval_ms = 50;
-
-        cfg.admission.min_recompute_cost = 0;  // Accept everything
+        cfg.admission.min_recompute_cost = 0;
         cfg.admission.base_threshold = 1000;
 
         cfg.checkpoint.interval_s = 3600;  // Don't auto-checkpoint
@@ -72,9 +67,6 @@ TEST_F(EngineTest, PutAndGet) {
 
     EXPECT_EQ(engine.put(key, data.data(), data.size(), opts), Status::kOk);
 
-    // Wait for flush to complete
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
     std::vector<uint8_t> buf(4096);
     size_t out_len = 0;
     Status s = engine.get(key, buf.data(), buf.size(), &out_len);
@@ -97,9 +89,6 @@ TEST_F(EngineTest, Contains) {
     opts.recompute_cost = 100;
     engine.put(key, data.data(), data.size(), opts);
 
-    // Wait for flush
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
     EXPECT_TRUE(engine.contains(key));
 
     engine.close();
@@ -115,7 +104,6 @@ TEST_F(EngineTest, Delete) {
     opts.recompute_cost = 100;
     engine.put(key, data.data(), data.size(), opts);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     EXPECT_TRUE(engine.contains(key));
 
     EXPECT_EQ(engine.del(key), Status::kOk);
@@ -160,8 +148,6 @@ TEST_F(EngineTest, MultiplePutsAndGets) {
         std::vector<uint8_t> data(256, static_cast<uint8_t>(i));
         engine.put(key, data.data(), data.size(), opts);
     }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     for (int i = 0; i < kCount; ++i) {
         StorageKey key{static_cast<uint64_t>(i), 0, 0, 0, 0};

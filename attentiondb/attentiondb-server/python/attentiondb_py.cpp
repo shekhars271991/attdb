@@ -140,11 +140,7 @@ PYBIND11_MODULE(_attentiondb, m) {
         .def_readonly("eviction_protected", &EngineStats::eviction_protected)
         .def_readonly("eviction_probationary", &EngineStats::eviction_probationary)
         .def_readonly("admission_evaluated", &EngineStats::admission_evaluated)
-        .def_readonly("admission_rejected", &EngineStats::admission_rejected)
-        .def_readonly("wb_submitted", &EngineStats::wb_submitted)
-        .def_readonly("wb_rejected", &EngineStats::wb_rejected)
-        .def_readonly("wb_flushed", &EngineStats::wb_flushed)
-        .def_readonly("wb_utilization", &EngineStats::wb_utilization);
+        .def_readonly("admission_rejected", &EngineStats::admission_rejected);
 
     py::class_<PyEngine>(m, "Engine")
         .def(py::init<const std::string&>(), py::arg("config_path") = "")

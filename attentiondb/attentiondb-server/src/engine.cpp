@@ -42,14 +42,6 @@ Status AttentionDBEngine::open(const Config& config) {
     // Admission control
     admission_ = std::make_unique<AdmissionControl>(config_.admission);
 
-    // Write buffer
-    write_buffer_ = std::make_unique<WriteBuffer>(config_.write_buffer);
-    write_buffer_->set_flush_callback(
-        [this](std::vector<WriteBuffer::PendingWrite>&& batch) {
-            flush_write_batch(std::move(batch));
-        });
-    write_buffer_->start();
-
     // Checkpoint
     std::string ckpt_dir = config_.nvme_store.enabled
         ? config_.nvme_store.paths[0] + "/checkpoint"
@@ -90,7 +82,6 @@ void AttentionDBEngine::close() {
 
     logger_->info("engine_closing", "");
 
-    write_buffer_->stop();
     checkpoint_->stop();
     logger_->stop();
 
@@ -300,70 +291,10 @@ EngineStats AttentionDBEngine::stats() {
     s.admission_evaluated = admission_->total_evaluated();
     s.admission_rejected = admission_->total_rejected();
 
-    s.wb_submitted = write_buffer_->total_submitted();
-    s.wb_rejected = write_buffer_->total_rejected_bp();
-    s.wb_flushed = write_buffer_->total_flushed();
-    s.wb_utilization = write_buffer_->utilization();
-
     s.last_checkpoint_entries = checkpoint_->last_checkpoint_entries();
     s.last_checkpoint_duration_ms = checkpoint_->last_checkpoint_duration_ms();
 
     return s;
-}
-
-void AttentionDBEngine::flush_write_batch(
-    std::vector<WriteBuffer::PendingWrite>&& batch) {
-    for (auto& pw : batch) {
-        IndexEntry entry{};
-        std::memset(&entry, 0, sizeof(entry));
-        entry.recompute_cost = pw.opts.recompute_cost;
-        entry.num_tokens = pw.opts.num_tokens;
-        entry.access_count = 1;
-        entry.slru_segment = static_cast<uint8_t>(SlruSegment::kProbationary);
-        entry.checksum = pw.checksum;
-        entry.length = static_cast<uint32_t>(pw.data.size());
-        entry.set_created_at_us(now_us());
-        entry.set_last_access_us(now_us());
-
-        bool stored_in_t1 = false;
-
-        // Try T1 first
-        if (t1_allocator_) {
-            void* ptr = nullptr;
-            auto handle = t1_allocator_->allocate(pw.data.size(), &ptr);
-            if (handle.valid()) {
-                std::memcpy(ptr, pw.data.data(), pw.data.size());
-                entry.tier = static_cast<uint8_t>(Tier::kT1Dram);
-                entry.address = reinterpret_cast<uint64_t>(ptr);
-                entry.segment_id = 0;
-                stored_in_t1 = true;
-                t1_eviction_->on_insert(pw.key, pw.opts.recompute_cost,
-                                         pw.key.chunk_index);
-            }
-        }
-
-        // If T1 full or not available, go to T2
-        if (!stored_in_t1 && t2_store_) {
-            BlobLocation loc{};
-            Status s = t2_store_->write(pw.key, pw.data.data(), pw.data.size(),
-                                         pw.checksum, &loc);
-            if (s == Status::kOk) {
-                entry.tier = static_cast<uint8_t>(Tier::kT2Nvme);
-                entry.address = loc.offset;
-                entry.segment_id = loc.segment_id;
-                t2_eviction_->on_insert(pw.key, pw.opts.recompute_cost,
-                                         pw.key.chunk_index);
-            } else {
-                logger_->warn("flush_write_failed", "");
-                continue;
-            }
-        }
-
-        index_->upsert(pw.key, entry);
-        checkpoint_->mark_dirty();
-    }
-
-    evict_if_needed();
 }
 
 void AttentionDBEngine::evict_if_needed() {

@@ -25,7 +25,6 @@ add_library(attentiondb_core STATIC
     src/storage/posix_engine.cpp
     src/eviction/cw_slru.cpp
     src/admission/admission.cpp
-    src/write_buffer/write_buffer.cpp
     src/checkpoint/checkpoint.cpp
     src/logging/logger.cpp
     src/engine.cpp
@@ -95,7 +94,6 @@ if(ATTENTIONDB_BUILD_TESTS)
     add_attentiondb_test(test_blob_store   tests/test_blob_store.cpp)
     add_attentiondb_test(test_eviction     tests/test_eviction.cpp)
     add_attentiondb_test(test_admission    tests/test_admission.cpp)
-    add_attentiondb_test(test_write_buffer tests/test_write_buffer.cpp)
     add_attentiondb_test(test_checkpoint   tests/test_checkpoint.cpp)
     add_attentiondb_test(test_engine       tests/test_engine.cpp)
 endif()

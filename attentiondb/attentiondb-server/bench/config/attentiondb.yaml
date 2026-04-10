@@ -28,10 +28,6 @@ nvme_store:
   io_engine: io_uring
   gc_enabled: true
 
-write_buffer:
-  size_bytes: 2147483648          # 2 GiB
-  flush_interval_ms: 5
-
 admission:
   min_recompute_cost: 0          # accept all during benchmark
 

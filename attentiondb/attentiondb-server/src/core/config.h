@@ -23,8 +23,6 @@ struct NvmeStoreConfig {
     size_t max_size_per_drive = 1ULL * 1024 * 1024 * 1024 * 1024;  // 1 TB
     size_t segment_size = 1ULL * 1024 * 1024 * 1024;               // 1 GB
     uint32_t fd_pool_size = 256;
-    size_t write_buffer_size = 8ULL * 1024 * 1024;                  // 8 MB
-    uint32_t flush_interval_ms = 50;
     size_t alignment = 4096;
 
     std::string io_engine = "io_uring";  // "io_uring" | "posix"
@@ -47,11 +45,6 @@ struct EvictionConfig {
     double protected_ratio = 0.25;
 };
 
-struct WriteBufferConfig {
-    size_t size_bytes = 256ULL * 1024 * 1024;  // 256 MB
-    uint32_t flush_interval_ms = 50;
-};
-
 struct CheckpointConfig {
     uint32_t interval_s = 30;
 };
@@ -68,7 +61,6 @@ struct Config {
     NvmeStoreConfig nvme_store;
     AdmissionConfig admission;
     EvictionConfig eviction;
-    WriteBufferConfig write_buffer;
     CheckpointConfig checkpoint;
     LoggingConfig logging;
     uint32_t get_timeout_ms = 5;

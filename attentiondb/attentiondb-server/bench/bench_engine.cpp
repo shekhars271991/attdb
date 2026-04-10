@@ -5,10 +5,9 @@
 //
 // BM_EnginePut: Sustained write throughput at varying KV cache blob sizes
 //   (256KB, 1MB, 4MB). Each iteration submits a unique key through the
-//   admission control and write buffer pipeline. Blobs land in T1 DRAM
-//   until full, then spill to T2 NVMe via posix I/O. Reports MB/s and
-//   ops/s to characterize the write-path bottleneck (admission + memcpy
-//   for T1, sequential disk I/O for T2).
+//   admission control pipeline. Blobs land in T1 DRAM until full, then
+//   spill to T2 NVMe via direct synchronous I/O. Reports MB/s and ops/s
+//   to characterize the write-path bottleneck.
 //
 // BM_EngineGet: Read throughput from a pre-populated working set sized to
 //   fit in T1 DRAM (~64MB). Iterates over keys round-robin so every get
@@ -18,10 +17,8 @@
 
 #include <benchmark/benchmark.h>
 
-#include <chrono>
 #include <cstring>
 #include <filesystem>
-#include <thread>
 #include <unistd.h>
 
 #include "engine.h"
@@ -41,8 +38,6 @@ static Config bench_config(const std::string& dir) {
     cfg.nvme_store.segment_size = 64 * 1024 * 1024;
     cfg.nvme_store.io_engine = "posix";
     cfg.nvme_store.gc_enabled = false;
-    cfg.write_buffer.size_bytes = 16 * 1024 * 1024;
-    cfg.write_buffer.flush_interval_ms = 10;
     cfg.admission.min_recompute_cost = 0;
     cfg.checkpoint.interval_s = 3600;
     cfg.logging.level = "error";
@@ -93,8 +88,6 @@ static void BM_EngineGet(benchmark::State& state) {
         StorageKey key{i, 0, 0, 0, 0};
         engine.put(key, data.data(), data.size(), opts);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(
-        std::max<int64_t>(500, static_cast<int64_t>(kEntries) * blob_size / (64 * 1024))));
 
     std::vector<uint8_t> buf(blob_size + 4096);
     uint64_t i = 0;

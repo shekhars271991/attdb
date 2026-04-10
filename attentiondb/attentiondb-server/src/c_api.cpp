@@ -121,8 +121,7 @@ attentiondb_status_t attentiondb_batched_put(attentiondb_t* handle,
         StorageKey sk = to_storage_key(&keys[i]);
         PutOpts po = to_put_opts(&opts[i]);
         Status s = handle->engine.put(sk, blobs[i], blob_lens[i], po);
-        if (s != Status::kOk && s != Status::kRejectedAdmission &&
-            s != Status::kRejectedBackpressure) {
+        if (s != Status::kOk && s != Status::kRejectedAdmission) {
             return to_c_status(s);
         }
     }
@@ -163,10 +162,6 @@ attentiondb_status_t attentiondb_stats(attentiondb_t* handle,
     stats_out->eviction_probationary = s.eviction_probationary;
     stats_out->admission_evaluated = s.admission_evaluated;
     stats_out->admission_rejected = s.admission_rejected;
-    stats_out->wb_submitted = s.wb_submitted;
-    stats_out->wb_rejected = s.wb_rejected;
-    stats_out->wb_flushed = s.wb_flushed;
-    stats_out->wb_utilization = s.wb_utilization;
     stats_out->last_checkpoint_entries = s.last_checkpoint_entries;
     stats_out->last_checkpoint_duration_ms = s.last_checkpoint_duration_ms;
 
