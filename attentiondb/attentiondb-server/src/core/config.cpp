@@ -13,15 +13,19 @@ size_t ParseSize(const std::string& s) {
     size_t val = 0;
     size_t i = 0;
     while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
-        val = val * 10 + (s[i] - '0');
+        size_t next = val * 10 + static_cast<size_t>(s[i] - '0');
+        if (next < val) return SIZE_MAX;  // overflow
+        val = next;
         ++i;
     }
     std::string suffix = s.substr(i);
-    if (suffix == "KB" || suffix == "kb") return val * 1024;
-    if (suffix == "MB" || suffix == "mb") return val * 1024 * 1024;
-    if (suffix == "GB" || suffix == "gb") return val * 1024ULL * 1024 * 1024;
-    if (suffix == "TB" || suffix == "tb") return val * 1024ULL * 1024 * 1024 * 1024;
-    return val;
+    size_t multiplier = 1;
+    if (suffix == "KB" || suffix == "kb") multiplier = 1024;
+    else if (suffix == "MB" || suffix == "mb") multiplier = 1024ULL * 1024;
+    else if (suffix == "GB" || suffix == "gb") multiplier = 1024ULL * 1024 * 1024;
+    else if (suffix == "TB" || suffix == "tb") multiplier = 1024ULL * 1024 * 1024 * 1024;
+    if (val > SIZE_MAX / multiplier) return SIZE_MAX;
+    return val * multiplier;
 }
 
 }  // namespace

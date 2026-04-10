@@ -53,6 +53,7 @@ public:
         uint64_t live_bytes;
         uint64_t gc_reclaimed_bytes;
         uint32_t gc_cycles;
+        uint64_t flush_errors;
     };
 
     explicit BlobStore(const NvmeStoreConfig& config);
@@ -98,7 +99,7 @@ private:
     int open_segment_fd(const std::string& path, bool create);
     std::string segment_path(uint32_t id) const;
     void gc_thread_fn();
-    void gc_compact_segment(SegmentInfo& seg);
+    void gc_compact_segment(uint32_t seg_id);
     void write_segment_header(int fd, const SegmentInfo& seg);
 
     void flush_thread_fn();
@@ -133,6 +134,7 @@ private:
     std::atomic<uint64_t> total_bytes_on_disk_{0};
     std::atomic<uint64_t> gc_reclaimed_bytes_{0};
     std::atomic<uint32_t> gc_cycles_{0};
+    std::atomic<uint64_t> flush_errors_{0};
 };
 
 }  // namespace attentiondb

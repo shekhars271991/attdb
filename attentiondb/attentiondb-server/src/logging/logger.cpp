@@ -119,7 +119,7 @@ void Logger::periodic_summary_fn() {
                  "\"t1_hit_rate\":%.3f,\"t2_hit_rate\":%.3f,\"miss_rate\":%.3f,"
                  "\"gets\":%llu,\"puts\":%llu,\"puts_rejected\":%llu,"
                  "\"evictions\":%llu,"
-                 "\"avg_get_latency_us\":%llu,\"p99_get_latency_us\":%llu",
+                 "\"avg_get_latency_us\":%llu,\"max_get_latency_us\":%llu",
                  config_.periodic_summary_interval_s,
                  t1_rate, t2_rate, miss_rate,
                  (unsigned long long)gets, (unsigned long long)puts,

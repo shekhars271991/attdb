@@ -18,22 +18,17 @@ LMCache config (config.yaml):
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-import struct
-from typing import List, Optional
+from typing import List
 from urllib.parse import urlparse
 
 from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorContext
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
+from attentiondb._util import hash_u64
+
 logger = logging.getLogger(__name__)
-
-
-def _hash_u64(s: str) -> int:
-    h = hashlib.sha256(s.encode()).digest()[:8]
-    return struct.unpack("<Q", h)[0]
 
 
 def _parse_config_path(remote_url: str) -> str:
@@ -110,12 +105,12 @@ class AttentionDBConnector(RemoteConnector):
         chunk_hash = getattr(key, "chunk_hash", 0)
         worker_id = getattr(key, "worker_id", 0)
 
-        model_id = _hash_u64(model_name) if isinstance(model_name, str) else model_name
+        model_id = hash_u64(model_name) if isinstance(model_name, str) else model_name
 
         if isinstance(chunk_hash, int):
             chunk_hash_u64 = chunk_hash & 0xFFFFFFFFFFFFFFFF
         else:
-            chunk_hash_u64 = _hash_u64(str(chunk_hash))
+            chunk_hash_u64 = hash_u64(str(chunk_hash))
 
         return self._adb.StorageKey(
             model_id=model_id & 0xFFFFFFFFFFFFFFFF,
@@ -174,7 +169,7 @@ class AttentionDBConnector(RemoteConnector):
             memory_obj = self.reshape_partial_chunk(memory_obj, actual)
             return memory_obj
 
-        except Exception as e:
+        except (RuntimeError, ValueError, OverflowError) as e:
             logger.error("AttentionDB get failed for key %s: %s", sk, e)
             return None
 
@@ -209,9 +204,9 @@ class AttentionDBConnector(RemoteConnector):
             )
             self._engine.put(sk, blob, opts)
 
-        except RuntimeError:
-            pass  # admission/backpressure rejection
-        except Exception as e:
+        except RuntimeError as e:
+            logger.debug("AttentionDB put rejected for key %s: %s", sk, e)
+        except (ValueError, OverflowError) as e:
             logger.error("AttentionDB put failed for key %s: %s", sk, e)
 
     async def list(self) -> List[str]:

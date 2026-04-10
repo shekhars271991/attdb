@@ -426,5 +426,33 @@ Severities: CRITICAL > HIGH > MEDIUM > LOW > INFO
   [ ] Add missing test scenarios per coverage summary (section 5)
 
 ================================================================================
+ 8. ADDITIONAL MISSED FINDINGS (POST-REVIEW ADDENDUM)
+================================================================================
+
+8.1  HIGH — CONFIG SCHEMA MISMATCH SILENTLY DROPS SETTINGS
+     File: attentiondb-server/src/core/config.cpp:37-55
+     File: attentiondb-server/bench/config/attentiondb.yaml:8-35
+     Config::LoadFromString expects root key "attentiondb" and nested "local"
+     fields (t1_dram_size, t2_nvme_path, ...), while the benchmark YAML uses
+     top-level sections (dram_cache, nvme_store, ...). Custom values can be
+     ignored and defaults silently applied, causing benchmark/runtime drift.
+
+8.2  HIGH — UNPINNED EXTERNAL REPOSITORY EXECUTION IN BENCHMARK SCRIPT
+     File: attentiondb-server/bench/kv_offloading_attentiondb_benchmark.sh:123-132
+     Script clones/pulls and executes/builds from a moving GitHub branch
+     (attdb.git) without pinning commit/tag. Results are non-reproducible and
+     introduce supply-chain risk.
+
+8.3  MEDIUM — C API BATCHED PUT LACKS PER-ITEM NULL CHECK
+     File: attentiondb-server/src/c_api.cpp:118-124
+     attentiondb_batched_put validates top-level arrays but not each blobs[i].
+     A nullptr element can be passed into engine.put(...), risking crash/UB.
+
+8.4  LOW (OUTSIDE ORIGINAL SCOPE) — PRIVATE KEY MATERIAL PRESENT LOCALLY
+     File: secrets/skrgpuuseast.pem
+     RSA private key file is present in workspace. It is ignored by .gitignore,
+     but still poses operational exposure risk if copied/shared/backed up.
+
+================================================================================
  END OF REPORT
 ================================================================================

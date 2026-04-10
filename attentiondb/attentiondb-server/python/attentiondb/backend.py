@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import struct
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +19,7 @@ ENTRY_TYPE_SYSTEM_PROMPT = 1
 ENTRY_TYPE_RAG_CONTEXT = 2
 
 
-def _hash_u64(s: str) -> int:
-    """Hash a string to a uint64 using first 8 bytes of SHA-256."""
-    h = hashlib.sha256(s.encode()).digest()[:8]
-    return struct.unpack("<Q", h)[0]
+from attentiondb._util import hash_u64 as _hash_u64
 
 
 class AttentionDBBackend:
@@ -110,9 +105,8 @@ class AttentionDBBackend:
             data = self._extract_bytes(mem)
             try:
                 self._engine.put(storage_key, data, opts)
-            except RuntimeError:
-                # Admission/backpressure rejection — acceptable
-                pass
+            except RuntimeError as e:
+                logger.debug("Put rejected for key: %s", e)
 
     def remove(self, key) -> None:
         storage_key = self._map_key(key)

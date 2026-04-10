@@ -8,7 +8,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "")
 FetchContent_Declare(
     libcuckoo
     GIT_REPOSITORY https://github.com/efficient/libcuckoo.git
-    GIT_TAG        master
+    GIT_TAG        v0.3.1
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(libcuckoo)

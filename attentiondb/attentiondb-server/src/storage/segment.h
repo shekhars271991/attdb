@@ -46,7 +46,9 @@ inline size_t align_up(size_t val, size_t alignment) {
 
 // Total on-disk size for a blob entry including header and alignment padding.
 inline size_t entry_disk_size(size_t blob_size) {
-    return align_up(kEntryHeaderSize + blob_size, kAlignment);
+    size_t raw = kEntryHeaderSize + blob_size;
+    if (raw < blob_size) return SIZE_MAX;  // overflow guard
+    return align_up(raw, kAlignment);
 }
 
 }  // namespace attentiondb

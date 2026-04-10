@@ -25,7 +25,7 @@ SlabAllocator::SlabAllocator(const DramCacheConfig& config)
 
 SlabAllocator::~SlabAllocator() {
     for (size_t i = 0; i < backing_allocations_.size(); ++i) {
-        free_backing(backing_allocations_[i], classes_[i].slot_size * classes_[i].num_slots);
+        free_backing(backing_allocations_[i], backing_sizes_[i], backing_methods_[i]);
     }
 }
 
@@ -48,6 +48,8 @@ void SlabAllocator::init_classes(const DramCacheConfig& config) {
 
     classes_.reserve(num_classes);
     backing_allocations_.resize(num_classes);
+    backing_methods_.resize(num_classes);
+    backing_sizes_.resize(num_classes);
 
     for (size_t i = 0; i < num_classes; ++i) {
         classes_.emplace_back();
@@ -57,8 +59,11 @@ void SlabAllocator::init_classes(const DramCacheConfig& config) {
         if (sc.num_slots == 0) sc.num_slots = 1;
 
         size_t region_size = sc.slot_size * sc.num_slots;
-        sc.base = static_cast<uint8_t*>(alloc_backing(region_size));
+        AllocMethod method{};
+        sc.base = static_cast<uint8_t*>(alloc_backing(region_size, method));
         backing_allocations_[i] = sc.base;
+        backing_methods_[i] = method;
+        backing_sizes_[i] = region_size;
         total_bytes_ += region_size;
 
         sc.free_list.resize(sc.num_slots);
@@ -66,13 +71,15 @@ void SlabAllocator::init_classes(const DramCacheConfig& config) {
     }
 }
 
-void* SlabAllocator::alloc_backing(size_t bytes) {
+void* SlabAllocator::alloc_backing(size_t bytes, AllocMethod& method_out) {
 #ifdef ATTENTIONDB_CUDA
     if (use_pinned_) {
         void* ptr = nullptr;
         cudaError_t err = cudaMallocHost(&ptr, bytes);
-        if (err == cudaSuccess) return ptr;
-        // Fall through to non-CUDA path
+        if (err == cudaSuccess) {
+            method_out = AllocMethod::kCudaPinned;
+            return ptr;
+        }
     }
 #endif
 
@@ -80,35 +87,38 @@ void* SlabAllocator::alloc_backing(size_t bytes) {
     if (use_hugepages_) {
         void* ptr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-        if (ptr != MAP_FAILED) return ptr;
-        // Fall through to regular allocation
+        if (ptr != MAP_FAILED) {
+            method_out = AllocMethod::kHugepages;
+            return ptr;
+        }
     }
 #endif
 
     void* ptr = std::aligned_alloc(4096, bytes);
     if (!ptr) throw std::bad_alloc();
     std::memset(ptr, 0, bytes);
+    method_out = AllocMethod::kAlignedAlloc;
     return ptr;
 }
 
-void SlabAllocator::free_backing(void* ptr, size_t bytes) {
+void SlabAllocator::free_backing(void* ptr, size_t bytes, AllocMethod method) {
     if (!ptr) return;
 
+    switch (method) {
 #ifdef ATTENTIONDB_CUDA
-    if (use_pinned_) {
+    case AllocMethod::kCudaPinned:
         cudaFreeHost(ptr);
         return;
-    }
 #endif
-
 #ifdef __linux__
-    if (use_hugepages_) {
+    case AllocMethod::kHugepages:
         munmap(ptr, bytes);
         return;
-    }
 #endif
-
-    std::free(ptr);
+    default:
+        std::free(ptr);
+        return;
+    }
 }
 
 SlabHandle SlabAllocator::allocate(size_t size, void** ptr) {
@@ -138,6 +148,21 @@ void SlabAllocator::free(SlabHandle handle) {
 
     std::lock_guard<std::mutex> lock(sc.mu);
     sc.free_list.push_back(handle.slot_index);
+}
+
+void SlabAllocator::free_by_ptr(void* ptr) {
+    if (!ptr) return;
+    auto* p = static_cast<uint8_t*>(ptr);
+    for (uint32_t i = 0; i < classes_.size(); ++i) {
+        auto& sc = classes_[i];
+        if (p >= sc.base && p < sc.base + sc.slot_size * sc.num_slots) {
+            size_t offset = static_cast<size_t>(p - sc.base);
+            uint32_t slot = static_cast<uint32_t>(offset / sc.slot_size);
+            std::lock_guard<std::mutex> lock(sc.mu);
+            sc.free_list.push_back(slot);
+            return;
+        }
+    }
 }
 
 void* SlabAllocator::get_ptr(SlabHandle handle) const {

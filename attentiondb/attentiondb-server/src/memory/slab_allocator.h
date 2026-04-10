@@ -46,6 +46,9 @@ public:
     // Free a previously allocated slot.
     void free(SlabHandle handle);
 
+    // Free a slot by raw pointer (reverse lookup). O(num_classes).
+    void free_by_ptr(void* ptr);
+
     // Get pointer to the data for a given handle.
     void* get_ptr(SlabHandle handle) const;
 
@@ -74,12 +77,16 @@ private:
         SizeClass& operator=(const SizeClass&) = delete;
     };
 
+    enum class AllocMethod { kAlignedAlloc, kHugepages, kCudaPinned };
+
     void init_classes(const DramCacheConfig& config);
-    void* alloc_backing(size_t bytes);
-    void free_backing(void* ptr, size_t bytes);
+    void* alloc_backing(size_t bytes, AllocMethod& method_out);
+    void free_backing(void* ptr, size_t bytes, AllocMethod method);
 
     std::vector<SizeClass> classes_;
     std::vector<void*> backing_allocations_;
+    std::vector<AllocMethod> backing_methods_;
+    std::vector<size_t> backing_sizes_;
     size_t total_bytes_ = 0;
     bool use_hugepages_;
     bool use_pinned_;

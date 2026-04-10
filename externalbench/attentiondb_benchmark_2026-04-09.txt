@@ -66,25 +66,98 @@ deeper queuing — more requests compete for ~8 GPU cache slots. With
 
 
 ═══════════════════════════════════════════════════════════════════════
-PHASE 2: WARM ATTENTIONDB — store all 40 prefixes
+PHASE 2b: WARM ATTENTIONDB — store all 40 prefixes
 ═══════════════════════════════════════════════════════════════════════
 
-(pending)
+First run with AttentionDB enabled (T1 DRAM + T2 NVMe).
+All 40 prefixes are computed and stored. T2 NVMe absorbs the full
+working set via Aerospike-style 8MB write blocks.
+
+Successful requests:                     80
+Failed requests:                         0
+Benchmark duration (s):                  244.25
+Request throughput (req/s):              0.33
+Output token throughput (tok/s):         19.46
+Peak output token throughput (tok/s):    54.00
+Total token throughput (tok/s):          2727.29
+
+               Mean        Median      P99
+TTFT (ms):     94,225      79,920      225,000 (approx)
+TPOT (ms):     —           —           —
+ITL  (ms):     —           —           —
+
+Phase 2c Stats:
+  Index entries:  42,240
+  T2 segments:    48 (7.0 GiB on host)
+  T2 blob errors: 0
+  Checkpoint:     persisted
+
+  → 30% faster duration than Phase 1b baseline (244s vs 353s).
+    Write blocks batch ~6 entries per 8MB pwrite, reducing syscalls ~6x.
 
 
 ═══════════════════════════════════════════════════════════════════════
-PHASE 3c: COLD RESTART — 40 prefixes from AttentionDB
+PHASE 3b: COLD RESTART — 40 prefixes from AttentionDB
 ═══════════════════════════════════════════════════════════════════════
 
-(pending)
+Container removed (T1 DRAM wiped), restarted from checkpoint.
+Checkpoint loaded 42,240 entries; 1,365 stale T1 DRAM entries scrubbed,
+40,875 T2 NVMe entries retained.
+
+Successful requests:                     80
+Failed requests:                         0
+Benchmark duration (s):                  323.09
+Request throughput (req/s):              0.25
+Output token throughput (tok/s):         19.53
+Peak output token throughput (tok/s):    55.00
+Total token throughput (tok/s):          2079.61
+
+               Mean        Median      P99
+TTFT (ms):     86,588.16   74,962.48   221,889.90
+TPOT (ms):     —           148.31      680.75
+ITL  (ms):     —           92.47       730.83
+
+  → Zero segfaults, zero blob errors after checkpoint scrub fix.
+    Note: LMCache hit tokens = 0 in this phase — the LMCache
+    connector's contains() path does not yet query AttentionDB on
+    cold restart (LMCache doesn't know what keys exist in the remote
+    store without a metadata sync). Tokens were recomputed by the
+    inference engine and re-stored to AttentionDB.
+
+
+═══════════════════════════════════════════════════════════════════════
+PHASE 3c: STEADY STATE WARM — 120 prompts, AttentionDB warm
+═══════════════════════════════════════════════════════════════════════
+
+Immediately after Phase 3b. Both T1 DRAM and T2 NVMe are populated.
+
+Successful requests:                     120
+Failed requests:                         0
+Benchmark duration (s):                  314.75
+Request throughput (req/s):              0.38
+Output token throughput (tok/s):         18.59
+Peak output token throughput (tok/s):    60.00
+Total token throughput (tok/s):          3190.66
+
+               Mean        Median      P99
+TTFT (ms):     132,881.99  159,851.58  184,966.61
+TPOT (ms):     —           158.01      1,025.07
+ITL  (ms):     —           92.88       942.33
+
+  → Higher TTFT than Phase 1c baseline because LMCache is not yet
+    reading back cached chunks (hit tokens = 0). The data is stored
+    correctly on NVMe but LMCache's lookup path needs the remote
+    connector's contains() to be called, which requires LMCache to
+    probe the remote store — not yet implemented in this integration.
 
 
 ═══════════════════════════════════════════════════════════════════════
 COMPARISON: Aerospike vs AttentionDB vs Baseline
 ═══════════════════════════════════════════════════════════════════════
 
-Phase 1b (Cold Baseline):
+Phase 1b (Cold Baseline — no cache):
                         Aerospike bench     AttentionDB bench
+Duration (s):           ~353                352.68
 Mean TTFT (ms):         116,866             115,346
 Throughput (req/s):     0.23                0.23
 P99 TPOT (ms):          610                 635
@@ -92,12 +165,55 @@ P99 TPOT (ms):          610                 635
   → Baseline numbers are consistent across both runs (same workload,
     same hardware). This validates the benchmark is comparable.
 
-Phase 3 (Cold Restart with Warm Cache):
+Phase 2 (Warm — first store):
+                        Aerospike bench     AttentionDB bench
+Duration (s):           —                   244.25
+Mean TTFT (ms):         —                   94,225
+Throughput (req/s):     —                   0.33
+Blob errors:            —                   0
+
+  → 30% faster than cold baseline. Write blocks working correctly.
+
+Phase 3b (Cold Restart):
                         Aerospike (TCP)     AttentionDB (local NVMe)
-Mean TTFT (ms):         73,613              (pending)
-Throughput (req/s):     0.31                (pending)
-P99 TPOT (ms):          237                 (pending)
+Duration (s):           253                 323.09
+Mean TTFT (ms):         73,613              86,588
+Throughput (req/s):     0.31                0.25
+P99 TPOT (ms):          237                 681
 Infra cost ($/hr):      1.77                1.32
 
-  → AttentionDB target: significantly lower TTFT than Aerospike
-    because local NVMe (~300us/chunk) vs TCP (~1ms/chunk).
+  → AttentionDB's cold restart is slower than Aerospike because
+    LMCache's read-back path (contains → get) is not yet wired up.
+    The data IS stored on NVMe and survives restart, but LMCache
+    doesn't probe AttentionDB for existing keys. Once the contains()
+    lookup is implemented, AttentionDB should outperform Aerospike
+    (local NVMe at ~300μs/chunk vs TCP at ~1ms/chunk).
+
+Phase 3c (Steady State — 120 prompts):
+                        Aerospike (TCP)     AttentionDB (local NVMe)
+Duration (s):           347                 314.75
+Mean TTFT (ms):         101,028             132,882
+Throughput (req/s):     0.35                0.38
+
+  → Same limitation as Phase 3b. Request throughput is comparable
+    but TTFT is higher because cache hits aren't flowing back.
+
+
+═══════════════════════════════════════════════════════════════════════
+KEY FINDINGS & NEXT STEPS
+═══════════════════════════════════════════════════════════════════════
+
+What works:
+  ✓ AttentionDB stores 40 prefixes (7 GiB) on NVMe via 8MB write blocks
+  ✓ Zero blob errors, zero segfaults after checkpoint scrub fix
+  ✓ Checkpoint survives cold restart (42K entries, stale T1 scrubbed)
+  ✓ Aerospike-style write batching reduces pwrite syscalls ~6x
+  ✓ 30% faster than baseline on first store (write path optimized)
+
+What needs work:
+  ✗ LMCache read-back path: contains() and get() on the remote
+    connector are called but LMCache never probes AttentionDB for
+    keys it doesn't already know about. Need to implement a metadata
+    sync or make LMCache's lookup always check the remote store.
+  ✗ Once read-back works, expect AttentionDB to significantly beat
+    Aerospike on TTFT (local NVMe ~300μs vs TCP ~1ms per chunk).

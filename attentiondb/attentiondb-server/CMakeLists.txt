@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+add_compile_options(-Wall -Wextra -Wpedantic)
+
 option(ATTENTIONDB_CUDA "Enable CUDA pinned memory and GDS support" OFF)
 option(ATTENTIONDB_BUILD_TESTS "Build unit tests" ON)
 option(ATTENTIONDB_BUILD_BENCH "Build benchmarks" ON)
@@ -35,11 +37,13 @@ target_include_directories(attentiondb_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+find_package(Threads REQUIRED)
+
 target_link_libraries(attentiondb_core PUBLIC
     libcuckoo
     xxHash::xxhash
     yaml-cpp
-    pthread
+    Threads::Threads
 )
 
 # Link liburing on Linux only
@@ -58,10 +62,7 @@ endif()
 
 # ── Shared library for C API ─────────────────────────────────────────────────
 
-add_library(attentiondb SHARED
-    src/c_api.cpp
-)
-
+add_library(attentiondb SHARED src/c_api_shim.cpp)
 target_link_libraries(attentiondb PRIVATE attentiondb_core)
 
 set_target_properties(attentiondb PROPERTIES

@@ -128,11 +128,12 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
         return Status::kRejectedAdmission;
     }
 
+    if (len > UINT32_MAX) {
+        return Status::kInvalidArgument;
+    }
+
     uint32_t crc = compute_crc32(blob, len);
 
-    // Write path: T1 is synchronous memcpy into DRAM slab.
-    // T2 appends into an Aerospike-style write block (one memcpy, no pwrite).
-    // The write block is flushed asynchronously; reads use read-through.
     IndexEntry entry{};
     std::memset(&entry, 0, sizeof(entry));
     entry.recompute_cost = opts.recompute_cost;
@@ -144,7 +145,7 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
     entry.set_created_at_us(now_us());
     entry.set_last_access_us(now_us());
 
-    bool stored_in_t1 = false;
+    bool stored = false;
 
     if (t1_allocator_) {
         void* ptr = nullptr;
@@ -154,12 +155,12 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
             entry.tier = static_cast<uint8_t>(Tier::kT1Dram);
             entry.address = reinterpret_cast<uint64_t>(ptr);
             entry.segment_id = 0;
-            stored_in_t1 = true;
+            stored = true;
             t1_eviction_->on_insert(key, opts.recompute_cost, key.chunk_index);
         }
     }
 
-    if (!stored_in_t1 && t2_store_) {
+    if (!stored && t2_store_) {
         BlobLocation loc{};
         Status s = t2_store_->write(key, blob, len, crc, &loc);
         if (s != Status::kOk) {
@@ -170,7 +171,13 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
         entry.tier = static_cast<uint8_t>(Tier::kT2Nvme);
         entry.address = loc.offset;
         entry.segment_id = loc.segment_id;
+        stored = true;
         t2_eviction_->on_insert(key, opts.recompute_cost, key.chunk_index);
+    }
+
+    if (!stored) {
+        logger_->period_stats().puts_rejected.fetch_add(1, std::memory_order_relaxed);
+        return Status::kIOError;
     }
 
     index_->upsert(key, entry);
@@ -178,9 +185,6 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
     evict_if_needed();
 
     logger_->period_stats().puts.fetch_add(1, std::memory_order_relaxed);
-    logger_->debug("put_accepted",
-                   std::string("\"blob_size\":") + std::to_string(len) +
-                   ",\"recompute_cost\":" + std::to_string(opts.recompute_cost));
 
     return Status::kOk;
 }
@@ -260,12 +264,8 @@ Status AttentionDBEngine::del(const StorageKey& key) {
     IndexEntry entry{};
     if (!index_->find(key, entry)) return Status::kNotFound;
 
-    // Free T1 memory if applicable
     if (entry.tier == static_cast<uint8_t>(Tier::kT1Dram) && t1_allocator_) {
-        // We stored the slab handle info in the address field.
-        // For simplicity, T1 entries track address as a raw pointer.
-        // The slab allocator free path requires the handle, which we'd need
-        // to store somewhere. For now, T1 entries are freed via the eviction path.
+        t1_allocator_->free_by_ptr(reinterpret_cast<void*>(entry.address));
     }
 
     // Mark dead in blob store for GC
@@ -316,40 +316,43 @@ EngineStats AttentionDBEngine::stats() {
 }
 
 void AttentionDBEngine::evict_if_needed() {
-    // Evict from T1 if over capacity
-    if (t1_allocator_) {
-        while (t1_allocator_->used_bytes() > t1_allocator_->total_capacity() * 0.95) {
-            auto victim = t1_eviction_->evict();
-            if (!victim) break;
+    if (!t1_allocator_) return;
 
-            IndexEntry entry{};
-            if (!index_->find(*victim, entry)) continue;
-            if (entry.tier != static_cast<uint8_t>(Tier::kT1Dram)) continue;
+    while (t1_allocator_->used_bytes() > t1_allocator_->total_capacity() * 0.95) {
+        auto victim = t1_eviction_->evict();
+        if (!victim) break;
 
-            // Demote to T2 if the entry is warm enough
-            bool demoted = false;
-            if (t2_store_ && entry.recompute_cost >= config_.admission.min_recompute_cost) {
-                auto* src = reinterpret_cast<void*>(entry.address);
-                BlobLocation loc{};
-                Status s = t2_store_->write(*victim, src, entry.length,
-                                             entry.checksum, &loc);
-                if (s == Status::kOk) {
-                    entry.tier = static_cast<uint8_t>(Tier::kT2Nvme);
-                    entry.address = loc.offset;
-                    entry.segment_id = loc.segment_id;
-                    index_->upsert(*victim, entry);
-                    t2_eviction_->on_insert(*victim, entry.recompute_cost,
-                                             victim->chunk_index);
-                    demoted = true;
-                }
+        IndexEntry entry{};
+        if (!index_->find(*victim, entry)) continue;
+        if (entry.tier != static_cast<uint8_t>(Tier::kT1Dram)) continue;
+
+        auto* src = reinterpret_cast<void*>(entry.address);
+
+        // Demote to T2 if the entry is warm enough
+        bool demoted = false;
+        if (t2_store_ && entry.recompute_cost >= config_.admission.min_recompute_cost) {
+            BlobLocation loc{};
+            Status s = t2_store_->write(*victim, src, entry.length,
+                                         entry.checksum, &loc);
+            if (s == Status::kOk) {
+                entry.tier = static_cast<uint8_t>(Tier::kT2Nvme);
+                entry.address = loc.offset;
+                entry.segment_id = loc.segment_id;
+                index_->upsert(*victim, entry);
+                t2_eviction_->on_insert(*victim, entry.recompute_cost,
+                                         victim->chunk_index);
+                demoted = true;
             }
-
-            if (!demoted) {
-                index_->erase(*victim);
-            }
-
-            logger_->period_stats().evictions.fetch_add(1, std::memory_order_relaxed);
         }
+
+        if (!demoted) {
+            index_->erase(*victim);
+        }
+
+        // Free the T1 slab slot regardless of demotion outcome
+        t1_allocator_->free_by_ptr(src);
+
+        logger_->period_stats().evictions.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

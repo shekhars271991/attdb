@@ -41,31 +41,35 @@ Status CheckpointManager::save(const ConcurrentHashMap& index) {
 
     out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
 
-    // Write sorted entries (sorted for deterministic checksum)
     std::sort(entries.begin(), entries.end(),
               [](const auto& a, const auto& b) {
                   return std::memcmp(&a.first, &b.first, sizeof(StorageKey)) < 0;
               });
 
     XXH32_state_t* hash_state = XXH32_createState();
+    if (!hash_state) return Status::kIOError;
     XXH32_reset(hash_state, 0);
 
     for (const auto& [key, entry] : entries) {
         out.write(reinterpret_cast<const char*>(&key), sizeof(StorageKey));
         out.write(reinterpret_cast<const char*>(&entry), sizeof(IndexEntry));
+        if (!out.good()) {
+            XXH32_freeState(hash_state);
+            return Status::kIOError;
+        }
         XXH32_update(hash_state, &key, sizeof(StorageKey));
         XXH32_update(hash_state, &entry, sizeof(IndexEntry));
     }
 
-    // Update header with checksum
     hdr.checksum = XXH32_digest(hash_state);
     XXH32_freeState(hash_state);
 
     out.seekp(0);
     out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    out.flush();
+    if (!out.good()) return Status::kIOError;
     out.close();
 
-    // Atomic rename
     std::filesystem::rename(tmp_path, final_path);
 
     dirty_.store(false, std::memory_order_relaxed);
@@ -92,10 +96,21 @@ Status CheckpointManager::load(ConcurrentHashMap& index) {
         return Status::kCorruption;
     }
 
+    // Sanity-check entry_count against file size to prevent OOM on corrupt files.
+    // Each entry is StorageKey + IndexEntry; cap at 100M entries as a safety limit.
+    static constexpr uint64_t kMaxEntries = 100'000'000;
+    if (hdr.entry_count > kMaxEntries) return Status::kCorruption;
+
+    auto file_size = std::filesystem::file_size(path);
+    size_t expected_body = hdr.entry_count * (sizeof(StorageKey) + sizeof(IndexEntry));
+    if (sizeof(CheckpointFileHeader) + expected_body > file_size)
+        return Status::kCorruption;
+
     std::vector<std::pair<StorageKey, IndexEntry>> entries;
     entries.reserve(hdr.entry_count);
 
     XXH32_state_t* hash_state = XXH32_createState();
+    if (!hash_state) return Status::kIOError;
     XXH32_reset(hash_state, 0);
 
     for (uint64_t i = 0; i < hdr.entry_count; ++i) {

@@ -29,7 +29,8 @@ static PutOpts to_put_opts(const attentiondb_put_opts_t* o) {
     PutOpts opts;
     opts.num_tokens = o->num_tokens;
     opts.recompute_cost = o->recompute_cost;
-    opts.entry_type = static_cast<EntryType>(o->entry_type);
+    if (o->entry_type <= static_cast<uint8_t>(EntryType::kRagContext))
+        opts.entry_type = static_cast<EntryType>(o->entry_type);
     opts.ttl_seconds = o->ttl_seconds;
     return opts;
 }
@@ -102,11 +103,14 @@ attentiondb_status_t attentiondb_delete(attentiondb_t* handle,
                                           const attentiondb_key_t* keys,
                                           size_t num_keys) {
     if (!handle || !keys) return ATTENTIONDB_INVALID_ARGUMENT;
+    attentiondb_status_t last_err = ATTENTIONDB_OK;
     for (size_t i = 0; i < num_keys; ++i) {
         StorageKey sk = to_storage_key(&keys[i]);
-        handle->engine.del(sk);
+        Status s = handle->engine.del(sk);
+        if (s != Status::kOk && s != Status::kNotFound)
+            last_err = to_c_status(s);
     }
-    return ATTENTIONDB_OK;
+    return last_err;
 }
 
 attentiondb_status_t attentiondb_batched_put(attentiondb_t* handle,
@@ -118,6 +122,7 @@ attentiondb_status_t attentiondb_batched_put(attentiondb_t* handle,
     if (!handle || !keys || !blobs || !blob_lens || !opts)
         return ATTENTIONDB_INVALID_ARGUMENT;
     for (size_t i = 0; i < count; ++i) {
+        if (!blobs[i]) continue;
         StorageKey sk = to_storage_key(&keys[i]);
         PutOpts po = to_put_opts(&opts[i]);
         Status s = handle->engine.put(sk, blobs[i], blob_lens[i], po);
@@ -137,6 +142,10 @@ attentiondb_status_t attentiondb_batched_get(attentiondb_t* handle,
     if (!handle || !keys || !bufs || !buf_lens || !blob_lens_out)
         return ATTENTIONDB_INVALID_ARGUMENT;
     for (size_t i = 0; i < count; ++i) {
+        if (!bufs[i]) {
+            blob_lens_out[i] = 0;
+            continue;
+        }
         StorageKey sk = to_storage_key(&keys[i]);
         Status s = handle->engine.get(sk, bufs[i], buf_lens[i], &blob_lens_out[i]);
         if (s == Status::kNotFound) {

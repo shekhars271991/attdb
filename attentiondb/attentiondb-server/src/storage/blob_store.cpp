@@ -40,39 +40,49 @@ Status BlobStore::open() {
     }
 
     // Scan for existing segments
-    for (const auto& base_path : config_.paths) {
-        for (const auto& entry : std::filesystem::directory_iterator(base_path)) {
-            if (entry.path().extension() == ".seg") {
-                auto stem = entry.path().stem().string();
-                if (stem.substr(0, 8) == "segment_") {
-                    uint32_t id = std::stoul(stem.substr(8));
-                    next_segment_id_ = std::max(next_segment_id_, id + 1);
+    try {
+        for (const auto& base_path : config_.paths) {
+            for (const auto& entry : std::filesystem::directory_iterator(base_path)) {
+                if (entry.path().extension() == ".seg") {
+                    auto stem = entry.path().stem().string();
+                    if (stem.size() > 8 && stem.substr(0, 8) == "segment_") {
+                        uint32_t id = 0;
+                        try { id = std::stoul(stem.substr(8)); }
+                        catch (...) { continue; }
 
-                    auto seg = std::make_unique<SegmentInfo>();
-                    seg->id = id;
-                    seg->path = entry.path().string();
-                    seg->fd = open_segment_fd(seg->path, false);
-                    if (seg->fd < 0) continue;
+                        next_segment_id_ = std::max(next_segment_id_, id + 1);
 
-                    SegmentHeader hdr{};
-                    io_->sync_read(seg->fd, &hdr, sizeof(hdr), 0);
+                        auto seg = std::make_unique<SegmentInfo>();
+                        seg->id = id;
+                        seg->path = entry.path().string();
+                        seg->fd = open_segment_fd(seg->path, false);
+                        if (seg->fd < 0) continue;
 
-                    if (hdr.magic == kSegmentMagic) {
-                        seg->entry_count = hdr.entry_count;
-                        seg->live_count.store(hdr.live_count);
-                        struct stat st;
-                        fstat(seg->fd, &st);
-                        seg->file_size = st.st_size;
-                        seg->write_offset = st.st_size;
-                        total_bytes_on_disk_ += seg->file_size;
+                        SegmentHeader hdr{};
+                        int ret = io_->sync_read(seg->fd, &hdr, sizeof(hdr), 0);
+
+                        if (ret >= static_cast<int>(sizeof(hdr)) && hdr.magic == kSegmentMagic) {
+                            seg->entry_count = hdr.entry_count;
+                            seg->live_count.store(hdr.live_count);
+                            struct stat st;
+                            if (::fstat(seg->fd, &st) == 0) {
+                                seg->file_size = st.st_size;
+                                seg->write_offset = st.st_size;
+                                total_bytes_on_disk_ += seg->file_size;
+                            }
+                        }
+                        segments_.push_back(std::move(seg));
                     }
-                    segments_.push_back(std::move(seg));
                 }
             }
         }
+    } catch (const std::filesystem::filesystem_error&) {
+        return Status::kIOError;
     }
 
     create_new_segment();
+    if (!active_segment_ || active_segment_->fd < 0)
+        return Status::kIOError;
 
     // Pre-allocate write block pool
     size_t block_capacity = static_cast<size_t>(config_.write_block_size_mb) * 1024 * 1024;
@@ -90,11 +100,10 @@ Status BlobStore::open() {
     {
         std::unique_lock<std::mutex> lock(block_mu_);
         active_block_ = acquire_block(lock);
-        if (active_block_) {
-            active_block_->reset(active_segment_->id,
-                                 active_segment_->write_offset,
-                                 active_segment_->fd);
-        }
+        if (!active_block_) return Status::kIOError;
+        active_block_->reset(active_segment_->id,
+                             active_segment_->write_offset,
+                             active_segment_->fd);
     }
 
     // Start flush thread
@@ -149,9 +158,14 @@ void BlobStore::close() {
 
 Status BlobStore::write(const StorageKey& key, const void* data, size_t len,
                          uint32_t checksum, BlobLocation* loc_out) {
+    if (len > UINT32_MAX - kEntryHeaderSize)
+        return Status::kInvalidArgument;
+
     size_t disk_size = entry_disk_size(len);
 
     std::unique_lock<std::mutex> lock(block_mu_);
+
+    if (!active_block_) return Status::kIOError;
 
     // If entry is larger than a full block, fall through to direct write
     if (disk_size > active_block_->capacity) {
@@ -206,6 +220,7 @@ Status BlobStore::write(const StorageKey& key, const void* data, size_t len,
         }
 
         active_block_ = acquire_block(lock);
+        if (!active_block_) return Status::kIOError;
 
         // Check if we need a new segment for the next block
         {
@@ -214,6 +229,8 @@ Status BlobStore::write(const StorageKey& key, const void* data, size_t len,
                 active_segment_->write_offset + active_block_->capacity > config_.segment_size) {
                 create_new_segment();
             }
+            if (!active_segment_ || active_segment_->fd < 0)
+                return Status::kIOError;
         }
         active_block_->reset(active_segment_->id,
                              active_segment_->write_offset,
@@ -380,10 +397,15 @@ void BlobStore::flush_thread_fn() {
             flushing_block_ = block;
         }
 
-        // Single pwrite for the entire block -- the key optimization
+        // Single pwrite for the entire block -- the key optimization.
+        // sync_write loops internally for short writes (EINTR), but we still
+        // verify the full block was committed and log if not.
         size_t write_size = align_up(block->pos, kAlignment);
-        io_->sync_write(block->segment_fd, block->buf, write_size,
-                        static_cast<off_t>(block->segment_offset));
+        int ret = io_->sync_write(block->segment_fd, block->buf, write_size,
+                                  static_cast<off_t>(block->segment_offset));
+        if (ret < 0 || static_cast<size_t>(ret) != write_size) {
+            flush_errors_.fetch_add(1, std::memory_order_relaxed);
+        }
 
         // Return block to free pool
         {
@@ -415,22 +437,22 @@ void BlobStore::mark_dead(const BlobLocation& loc) {
     std::lock_guard<std::mutex> lock(segments_mu_);
     for (auto& seg : segments_) {
         if (seg->id == loc.segment_id) {
-            seg->live_count.fetch_sub(1);
+            uint32_t prev = seg->live_count.load();
+            if (prev > 0) seg->live_count.fetch_sub(1);
             return;
         }
     }
 }
 
 void BlobStore::create_new_segment() {
-    // segments_mu_ may or may not be held by caller; use try_lock pattern
-    // Actually, all callers should hold segments_mu_ or block_mu_ which
-    // implies exclusive access to active_segment_. For safety, always lock.
-    // Note: callers from write() already hold block_mu_ and acquire segments_mu_.
-
     auto seg = std::make_unique<SegmentInfo>();
     seg->id = next_segment_id_++;
     seg->path = segment_path(seg->id);
     seg->fd = open_segment_fd(seg->path, true);
+    if (seg->fd < 0) {
+        active_segment_ = nullptr;
+        return;
+    }
     seg->write_offset = kSegmentHeaderSize;
     seg->entry_count = 0;
     seg->live_count.store(0);
@@ -487,24 +509,46 @@ void BlobStore::gc_thread_fn() {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         if (!gc_running_) break;
 
-        std::lock_guard<std::mutex> lock(segments_mu_);
+        // Collect candidates under lock, then compact outside lock
+        std::vector<uint32_t> candidates;
+        {
+            std::lock_guard<std::mutex> lock(segments_mu_);
+            for (auto& seg : segments_) {
+                if (seg.get() == active_segment_) continue;
+                if (seg->entry_count == 0) continue;
 
-        for (auto& seg : segments_) {
-            if (seg.get() == active_segment_) continue;
-            if (seg->entry_count == 0) continue;
-
-            double live_ratio = static_cast<double>(seg->live_count.load()) /
-                                seg->entry_count;
-            if (live_ratio < config_.gc_trigger_fragmentation) {
-                gc_compact_segment(*seg);
-                gc_cycles_.fetch_add(1);
+                double live_ratio = static_cast<double>(seg->live_count.load()) /
+                                    seg->entry_count;
+                if (live_ratio < config_.gc_trigger_fragmentation) {
+                    candidates.push_back(seg->id);
+                }
             }
+        }
+        for (uint32_t id : candidates) {
+            gc_compact_segment(id);
+            gc_cycles_.fetch_add(1);
         }
     }
 }
 
-void BlobStore::gc_compact_segment(SegmentInfo& seg) {
+void BlobStore::gc_compact_segment(uint32_t seg_id) {
     if (!gc_rewrite_cb_) return;
+
+    int fd = -1;
+    uint64_t write_off = 0;
+    std::string seg_path;
+    {
+        std::lock_guard<std::mutex> lock(segments_mu_);
+        for (auto& seg : segments_) {
+            if (seg->id == seg_id && seg.get() != active_segment_) {
+                fd = seg->fd;
+                write_off = seg->write_offset;
+                seg_path = seg->path;
+                break;
+            }
+        }
+    }
+    if (fd < 0) return;
 
     uint64_t offset = kSegmentHeaderSize;
 
@@ -512,10 +556,10 @@ void BlobStore::gc_compact_segment(SegmentInfo& seg) {
         static_cast<uint8_t*>(std::aligned_alloc(kAlignment, kAlignment)),
         &std::free);
 
-    while (offset < seg.write_offset) {
-        int ret = io_->sync_read(seg.fd, read_buf.get(), kEntryHeaderSize,
+    while (offset < write_off) {
+        int ret = io_->sync_read(fd, read_buf.get(), kEntryHeaderSize,
                                   static_cast<off_t>(offset));
-        if (ret < 0) break;
+        if (ret < static_cast<int>(kEntryHeaderSize)) break;
 
         auto* hdr = reinterpret_cast<const BlobEntryHeader*>(read_buf.get());
         if (hdr->padded_size == 0) break;
@@ -525,9 +569,9 @@ void BlobStore::gc_compact_segment(SegmentInfo& seg) {
             static_cast<uint8_t*>(std::aligned_alloc(kAlignment, disk_size)),
             &std::free);
 
-        ret = io_->sync_read(seg.fd, full_buf.get(), disk_size,
+        ret = io_->sync_read(fd, full_buf.get(), disk_size,
                               static_cast<off_t>(offset));
-        if (ret < 0) break;
+        if (ret < static_cast<int>(disk_size)) break;
 
         auto* entry_hdr = reinterpret_cast<const BlobEntryHeader*>(full_buf.get());
         StorageKey key;
@@ -539,17 +583,21 @@ void BlobStore::gc_compact_segment(SegmentInfo& seg) {
         offset += disk_size;
     }
 
-    uint64_t reclaimed = seg.write_offset;
-    gc_reclaimed_bytes_ += reclaimed;
-    total_bytes_on_disk_ -= reclaimed;
+    // Remove the segment from the vector and close/delete it.
+    std::lock_guard<std::mutex> lock(segments_mu_);
+    for (auto it = segments_.begin(); it != segments_.end(); ++it) {
+        if ((*it)->id == seg_id) {
+            uint64_t reclaimed = (*it)->write_offset;
+            gc_reclaimed_bytes_ += reclaimed;
+            if (total_bytes_on_disk_ >= reclaimed)
+                total_bytes_on_disk_ -= reclaimed;
 
-    ::ftruncate(seg.fd, 0);
-    ::close(seg.fd);
-    std::filesystem::remove(seg.path);
-    seg.fd = -1;
-    seg.entry_count = 0;
-    seg.live_count.store(0);
-    seg.write_offset = 0;
+            ::close((*it)->fd);
+            std::filesystem::remove((*it)->path);
+            segments_.erase(it);
+            break;
+        }
+    }
 }
 
 void BlobStore::set_gc_rewrite_callback(GcRewriteCallback cb) {
@@ -563,6 +611,7 @@ BlobStore::Stats BlobStore::stats() const {
     s.total_bytes_on_disk = total_bytes_on_disk_.load();
     s.gc_reclaimed_bytes = gc_reclaimed_bytes_.load();
     s.gc_cycles = gc_cycles_.load();
+    s.flush_errors = flush_errors_.load();
 
     for (const auto& seg : segments_) {
         if (seg->entry_count > 0) {
