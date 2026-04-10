@@ -34,11 +34,16 @@ Config Config::LoadFromString(const std::string& yaml_content) {
     YAML::Node root = YAML::Load(yaml_content);
     Config cfg;
 
-    auto adb = root["attentiondb"];
-    if (!adb) return cfg;
+    // Support two YAML layouts:
+    //   1. Nested under "attentiondb:" key  (legacy / programmatic)
+    //   2. Flat top-level keys              (human-friendly config files)
+    YAML::Node adb = root["attentiondb"];
+    bool flat = !adb;
+    if (flat) adb = root;
 
     if (adb["mode"]) cfg.mode = adb["mode"].as<std::string>();
 
+    // --- Legacy nested "local" section ---
     if (auto local = adb["local"]) {
         if (local["t1_dram_size"])
             cfg.dram_cache.size_bytes = ParseSize(local["t1_dram_size"].as<std::string>());
@@ -54,6 +59,37 @@ Config Config::LoadFromString(const std::string& yaml_content) {
             cfg.nvme_store.write_block_pool_size = local["write_block_pool_size"].as<uint32_t>();
     }
 
+    // --- Flat "dram_cache" section ---
+    if (auto dc = adb["dram_cache"]) {
+        if (dc["enabled"]) cfg.dram_cache.enabled = dc["enabled"].as<bool>();
+        if (dc["size_bytes"]) cfg.dram_cache.size_bytes = dc["size_bytes"].as<size_t>();
+        if (dc["hugepages"]) cfg.dram_cache.hugepages = dc["hugepages"].as<bool>();
+        if (dc["pinned_memory"]) cfg.dram_cache.pinned_memory = dc["pinned_memory"].as<bool>();
+        if (dc["size_classes"]) {
+            cfg.dram_cache.size_classes.clear();
+            for (const auto& sc : dc["size_classes"])
+                cfg.dram_cache.size_classes.push_back(sc.as<size_t>());
+        }
+    }
+
+    // --- Flat "nvme_store" section ---
+    if (auto nv = adb["nvme_store"]) {
+        if (nv["enabled"]) cfg.nvme_store.enabled = nv["enabled"].as<bool>();
+        if (nv["paths"]) {
+            cfg.nvme_store.paths.clear();
+            for (const auto& p : nv["paths"])
+                cfg.nvme_store.paths.push_back(p.as<std::string>());
+        }
+        if (nv["segment_size"]) cfg.nvme_store.segment_size = nv["segment_size"].as<size_t>();
+        if (nv["io_engine"]) cfg.nvme_store.io_engine = nv["io_engine"].as<std::string>();
+        if (nv["gc_enabled"]) cfg.nvme_store.gc_enabled = nv["gc_enabled"].as<bool>();
+        if (nv["write_block_size_mb"])
+            cfg.nvme_store.write_block_size_mb = nv["write_block_size_mb"].as<uint32_t>();
+        if (nv["write_block_pool_size"])
+            cfg.nvme_store.write_block_pool_size = nv["write_block_pool_size"].as<uint32_t>();
+    }
+
+    // --- admission ---
     if (auto adm = adb["admission"]) {
         if (adm["min_recompute_cost"].IsDefined())
             cfg.admission.min_recompute_cost = adm["min_recompute_cost"].as<uint32_t>();
@@ -61,28 +97,29 @@ Config Config::LoadFromString(const std::string& yaml_content) {
             cfg.admission.base_threshold = adm["base_threshold"].as<uint32_t>();
     }
 
+    // --- eviction ---
     if (auto ev = adb["eviction"]) {
-        if (ev["policy"])
-            cfg.eviction.policy = ev["policy"].as<std::string>();
-        if (ev["protected_ratio"])
-            cfg.eviction.protected_ratio = ev["protected_ratio"].as<double>();
+        if (ev["policy"]) cfg.eviction.policy = ev["policy"].as<std::string>();
+        if (ev["protected_ratio"]) cfg.eviction.protected_ratio = ev["protected_ratio"].as<double>();
     }
 
     if (auto to = adb["timeouts"]) {
-        if (to["get_ms"])
-            cfg.get_timeout_ms = to["get_ms"].as<uint32_t>();
+        if (to["get_ms"]) cfg.get_timeout_ms = to["get_ms"].as<uint32_t>();
     }
 
+    // --- checkpoint (flat "checkpoint" or legacy "index") ---
+    if (auto ckpt = adb["checkpoint"]) {
+        if (ckpt["interval_s"]) cfg.checkpoint.interval_s = ckpt["interval_s"].as<uint32_t>();
+    }
     if (auto idx = adb["index"]) {
         if (idx["checkpoint_interval_s"])
             cfg.checkpoint.interval_s = idx["checkpoint_interval_s"].as<uint32_t>();
     }
 
+    // --- logging ---
     if (auto log = adb["logging"]) {
-        if (log["level"])
-            cfg.logging.level = log["level"].as<std::string>();
-        if (log["format"])
-            cfg.logging.format = log["format"].as<std::string>();
+        if (log["level"]) cfg.logging.level = log["level"].as<std::string>();
+        if (log["format"]) cfg.logging.format = log["format"].as<std::string>();
         if (log["periodic_summary_interval_s"])
             cfg.logging.periodic_summary_interval_s = log["periodic_summary_interval_s"].as<uint32_t>();
     }
