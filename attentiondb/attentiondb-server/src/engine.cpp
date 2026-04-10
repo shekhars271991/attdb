@@ -112,9 +112,9 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
 
     uint32_t crc = compute_crc32(blob, len);
 
-    // Direct write path: write synchronously to T1/T2, bypassing write buffer.
-    // LMCache dispatches puts from a thread pool, so blocking here is fine.
-    // This avoids the extra data copy and backpressure issues of the write buffer.
+    // Write path: T1 is synchronous memcpy into DRAM slab.
+    // T2 appends into an Aerospike-style write block (one memcpy, no pwrite).
+    // The write block is flushed asynchronously; reads use read-through.
     IndexEntry entry{};
     std::memset(&entry, 0, sizeof(entry));
     entry.recompute_cost = opts.recompute_cost;

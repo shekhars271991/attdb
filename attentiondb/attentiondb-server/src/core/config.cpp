@@ -48,6 +48,10 @@ Config Config::LoadFromString(const std::string& yaml_content) {
             cfg.nvme_store.max_size_per_drive = ParseSize(local["t2_nvme_size"].as<std::string>());
         if (local["t2_use_gds"])
             cfg.nvme_store.io_engine = local["t2_use_gds"].as<bool>() ? "gds" : cfg.nvme_store.io_engine;
+        if (local["write_block_size_mb"])
+            cfg.nvme_store.write_block_size_mb = local["write_block_size_mb"].as<uint32_t>();
+        if (local["write_block_pool_size"])
+            cfg.nvme_store.write_block_pool_size = local["write_block_pool_size"].as<uint32_t>();
     }
 
     if (auto adm = adb["admission"]) {

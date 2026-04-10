@@ -30,6 +30,9 @@ struct NvmeStoreConfig {
     bool uring_registered_buffers = true;
     uint32_t gds_thread_pool_size = 4;
 
+    uint32_t write_block_size_mb = 8;    // Aerospike-style write block size (MB)
+    uint32_t write_block_pool_size = 8;  // Number of pre-allocated write blocks
+
     bool gc_enabled = true;
     double gc_trigger_fragmentation = 0.5;
     double gc_max_bandwidth_fraction = 0.2;
