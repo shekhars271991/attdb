@@ -67,7 +67,8 @@ bool WriteBuffer::should_accept(const PutOpts& opts, BackpressureLevel level) co
             return opts.entry_type == EntryType::kSystemPrompt ||
                    opts.recompute_cost >= 500;
         case BackpressureLevel::kEmergency:
-            return opts.entry_type == EntryType::kSystemPrompt;
+            return opts.entry_type == EntryType::kSystemPrompt ||
+                   opts.recompute_cost >= 1000;
         case BackpressureLevel::kFull:
             return false;
     }
@@ -112,10 +113,8 @@ void WriteBuffer::flush_thread_fn() {
 
             if (!running_ && queue_.empty()) break;
 
-            // Drain up to 64 entries per batch
-            constexpr size_t kMaxBatchSize = 64;
             size_t bytes_in_batch = 0;
-            while (!queue_.empty() && batch.size() < kMaxBatchSize) {
+            while (!queue_.empty()) {
                 bytes_in_batch += queue_.front().data.size();
                 batch.push_back(std::move(queue_.front()));
                 queue_.pop();
