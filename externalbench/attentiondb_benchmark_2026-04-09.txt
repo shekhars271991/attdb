@@ -1,0 +1,103 @@
+═══════════════════════════════════════════════════════════════════════
+AttentionDB KV Cache Offloading Benchmark — 2026-04-09
+═══════════════════════════════════════════════════════════════════════
+
+Instance: g6.4xlarge (1× L4 24 GB, 16 vCPUs, 64 GB RAM)
+Model:    mistralai/Ministral-8B-Instruct-2410
+Image:    lmcache/vllm-openai:v0.4.2 (baseline phases)
+
+Workload:
+  Prefixes:       40 unique, 8192 tokens each
+  Suffix:         128 tokens
+  Output:         256 tokens
+  Request rate:   1.0 RPS (Poisson)
+  GPU mem util:   0.92
+  Max model len:  16384
+
+Per-prefix KV size: 8192 tokens × 144 KB/token = 1.14 GB
+Total for 40 prefixes: 45.6 GB
+GPU KV cache: ~10 GiB → holds ~8 prefixes
+T1 DRAM (Phase 2+): 16 GiB → holds ~14 prefixes
+T2 NVMe (Phase 2+): all 40 prefixes
+
+
+═══════════════════════════════════════════════════════════════════════
+PHASE 1b: BASELINE COLD — 40 prefixes, APC only (no LMCache)
+═══════════════════════════════════════════════════════════════════════
+
+First encounter of all 40 prefixes. GPU computes each from scratch.
+As later prefixes arrive, earlier ones get evicted from GPU KV cache.
+
+Successful requests:                     80
+Failed requests:                         0
+Benchmark duration (s):                  352.68
+Request throughput (req/s):              0.23
+Output token throughput (tok/s):         19.61
+Peak concurrent requests:                62
+
+               Mean        Median      P99
+TTFT (ms):     115,345.98  107,389.20  250,164.48
+TPOT (ms):     190.04      160.27      634.52
+ITL  (ms):     166.79      92.52       729.74
+
+
+═══════════════════════════════════════════════════════════════════════
+PHASE 1c: BASELINE WARM — 40 prefixes, APC only (no LMCache)
+═══════════════════════════════════════════════════════════════════════
+
+APC has some prefixes cached, but can only hold ~8 of 40.
+The other ~32 prefixes still pay full recompute cost.
+
+Successful requests:                     120
+Failed requests:                         0
+Benchmark duration (s):                  574.94
+Request throughput (req/s):              0.21
+Output token throughput (tok/s):         24.10
+Peak concurrent requests:                97
+
+               Mean        Median      P99
+TTFT (ms):     222,792.35  227,367.24  447,415.16
+TPOT (ms):     147.28      125.95      639.54
+ITL  (ms):     148.87      92.89       731.45
+
+Note: TTFT increased vs Phase 1b because 120 prompts (vs 80) creates
+deeper queuing — more requests compete for ~8 GPU cache slots. With
+40 prefixes, ~80% of requests hit evicted entries and recompute.
+
+
+═══════════════════════════════════════════════════════════════════════
+PHASE 2: WARM ATTENTIONDB — store all 40 prefixes
+═══════════════════════════════════════════════════════════════════════
+
+(pending)
+
+
+═══════════════════════════════════════════════════════════════════════
+PHASE 3c: COLD RESTART — 40 prefixes from AttentionDB
+═══════════════════════════════════════════════════════════════════════
+
+(pending)
+
+
+═══════════════════════════════════════════════════════════════════════
+COMPARISON: Aerospike vs AttentionDB vs Baseline
+═══════════════════════════════════════════════════════════════════════
+
+Phase 1b (Cold Baseline):
+                        Aerospike bench     AttentionDB bench
+Mean TTFT (ms):         116,866             115,346
+Throughput (req/s):     0.23                0.23
+P99 TPOT (ms):          610                 635
+
+  → Baseline numbers are consistent across both runs (same workload,
+    same hardware). This validates the benchmark is comparable.
+
+Phase 3 (Cold Restart with Warm Cache):
+                        Aerospike (TCP)     AttentionDB (local NVMe)
+Mean TTFT (ms):         73,613              (pending)
+Throughput (req/s):     0.31                (pending)
+P99 TPOT (ms):          237                 (pending)
+Infra cost ($/hr):      1.77                1.32
+
+  → AttentionDB target: significantly lower TTFT than Aerospike
+    because local NVMe (~300us/chunk) vs TCP (~1ms/chunk).

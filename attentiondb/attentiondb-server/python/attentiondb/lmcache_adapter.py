@@ -201,7 +201,7 @@ class AttentionDBConnector(RemoteConnector):
             num_tokens = len(data_buffer) // self.single_token_size if self.single_token_size else 0
             opts = self._adb.PutOpts(
                 num_tokens=num_tokens,
-                recompute_cost=max(num_tokens * 10, 100),
+                recompute_cost=max(num_tokens * 100, 1000),
                 entry_type=0,
                 ttl_seconds=0,
             )
