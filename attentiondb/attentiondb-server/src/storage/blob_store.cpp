@@ -257,46 +257,67 @@ Status BlobStore::write(const StorageKey& key, const void* data, size_t len,
 
 Status BlobStore::read(const BlobLocation& loc, void* buf, size_t buf_len,
                         size_t* bytes_read) {
-    // Check pending write blocks first (read-through for unflushed data)
-    {
-        std::lock_guard<std::mutex> lock(block_mu_);
-        const uint8_t* pending = find_in_pending_blocks(loc);
-        if (pending) {
-            auto* hdr = reinterpret_cast<const BlobEntryHeader*>(pending);
+    // Try pending write blocks first, then disk. Retry once if disk gives
+    // a short read (data in flight between pending-blocks check and pwrite).
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        {
+            std::lock_guard<std::mutex> lock(block_mu_);
+            const uint8_t* pending = find_in_pending_blocks(loc);
+            if (pending) {
+                auto* hdr = reinterpret_cast<const BlobEntryHeader*>(pending);
+                if (hdr->blob_size > buf_len) return Status::kBufferTooSmall;
+                std::memcpy(buf, pending + kEntryHeaderSize, hdr->blob_size);
+                *bytes_read = hdr->blob_size;
+                return Status::kOk;
+            }
+        }
+
+        // Fall back to disk read
+        int fd = -1;
+        {
+            std::lock_guard<std::mutex> slock(segments_mu_);
+            for (const auto& seg : segments_) {
+                if (seg->id == loc.segment_id) {
+                    fd = seg->fd;
+                    break;
+                }
+            }
+        }
+        if (fd < 0) return Status::kNotFound;
+
+        auto aligned_buf = std::unique_ptr<uint8_t[], decltype(&std::free)>(
+            static_cast<uint8_t*>(std::aligned_alloc(kAlignment, loc.disk_size)),
+            &std::free);
+        if (!aligned_buf) return Status::kIOError;
+        std::memset(aligned_buf.get(), 0, loc.disk_size);
+
+        int ret = io_->sync_read(fd, aligned_buf.get(), loc.disk_size,
+                                  static_cast<off_t>(loc.offset));
+
+        if (ret < static_cast<int>(loc.disk_size)) {
+            if (attempt == 0) {
+                std::this_thread::yield();
+                continue;  // retry: re-check pending blocks
+            }
+            return Status::kNotFound;
+        }
+
+        auto* hdr = reinterpret_cast<const BlobEntryHeader*>(aligned_buf.get());
+        if (hdr->blob_size == 0 || hdr->blob_size > buf_len) {
+            if (hdr->blob_size == 0 && attempt == 0) {
+                std::this_thread::yield();
+                continue;  // retry: zeros read from disk, data likely in flight
+            }
             if (hdr->blob_size > buf_len) return Status::kBufferTooSmall;
-            std::memcpy(buf, pending + kEntryHeaderSize, hdr->blob_size);
-            *bytes_read = hdr->blob_size;
-            return Status::kOk;
+            return Status::kNotFound;
         }
+
+        std::memcpy(buf, aligned_buf.get() + kEntryHeaderSize, hdr->blob_size);
+        *bytes_read = hdr->blob_size;
+        return Status::kOk;
     }
 
-    // Fall back to disk read
-    std::lock_guard<std::mutex> slock(segments_mu_);
-
-    int fd = -1;
-    for (const auto& seg : segments_) {
-        if (seg->id == loc.segment_id) {
-            fd = seg->fd;
-            break;
-        }
-    }
-    if (fd < 0) return Status::kNotFound;
-
-    auto aligned_buf = std::unique_ptr<uint8_t[], decltype(&std::free)>(
-        static_cast<uint8_t*>(std::aligned_alloc(kAlignment, loc.disk_size)),
-        &std::free);
-
-    int ret = io_->sync_read(fd, aligned_buf.get(), loc.disk_size,
-                              static_cast<off_t>(loc.offset));
-    if (ret < 0) return Status::kIOError;
-
-    auto* hdr = reinterpret_cast<const BlobEntryHeader*>(aligned_buf.get());
-    if (hdr->blob_size > buf_len) return Status::kBufferTooSmall;
-
-    std::memcpy(buf, aligned_buf.get() + kEntryHeaderSize, hdr->blob_size);
-    *bytes_read = hdr->blob_size;
-
-    return Status::kOk;
+    return Status::kNotFound;
 }
 
 const uint8_t* BlobStore::find_in_pending_blocks(const BlobLocation& loc) const {
