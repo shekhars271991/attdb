@@ -39,7 +39,8 @@ public:
     }
 
     void put(const StorageKey& key, py::bytes data, const PutOpts& opts) {
-        std::string buf = data;
+        std::string buf = data;  // copy while GIL is held
+        py::gil_scoped_release release;
         check_status(engine_->put(key, buf.data(), buf.size(), opts), "put");
     }
 

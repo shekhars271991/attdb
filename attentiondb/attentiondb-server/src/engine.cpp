@@ -121,18 +121,52 @@ Status AttentionDBEngine::put(const StorageKey& key, const void* blob,
 
     uint32_t crc = compute_crc32(blob, len);
 
-    // Submit to write buffer (non-blocking)
-    Status s = write_buffer_->submit(key, blob, len, opts, crc);
-    if (s != Status::kOk) {
-        logger_->period_stats().puts_rejected.fetch_add(1, std::memory_order_relaxed);
+    // Direct write path: write synchronously to T1/T2, bypassing write buffer.
+    // LMCache dispatches puts from a thread pool, so blocking here is fine.
+    // This avoids the extra data copy and backpressure issues of the write buffer.
+    IndexEntry entry{};
+    std::memset(&entry, 0, sizeof(entry));
+    entry.recompute_cost = opts.recompute_cost;
+    entry.num_tokens = opts.num_tokens;
+    entry.access_count = 1;
+    entry.slru_segment = static_cast<uint8_t>(SlruSegment::kProbationary);
+    entry.checksum = crc;
+    entry.length = static_cast<uint32_t>(len);
+    entry.set_created_at_us(now_us());
+    entry.set_last_access_us(now_us());
 
-        char buf[64];
-        snprintf(buf, sizeof(buf), "\"level\":%d",
-                 static_cast<int>(write_buffer_->current_level()));
-        logger_->warn("put_rejected_backpressure", buf);
+    bool stored_in_t1 = false;
 
-        return s;
+    if (t1_allocator_) {
+        void* ptr = nullptr;
+        auto handle = t1_allocator_->allocate(len, &ptr);
+        if (handle.valid()) {
+            std::memcpy(ptr, blob, len);
+            entry.tier = static_cast<uint8_t>(Tier::kT1Dram);
+            entry.address = reinterpret_cast<uint64_t>(ptr);
+            entry.segment_id = 0;
+            stored_in_t1 = true;
+            t1_eviction_->on_insert(key, opts.recompute_cost, key.chunk_index);
+        }
     }
+
+    if (!stored_in_t1 && t2_store_) {
+        BlobLocation loc{};
+        Status s = t2_store_->write(key, blob, len, crc, &loc);
+        if (s != Status::kOk) {
+            logger_->period_stats().puts_rejected.fetch_add(1, std::memory_order_relaxed);
+            logger_->warn("direct_write_failed", "");
+            return s;
+        }
+        entry.tier = static_cast<uint8_t>(Tier::kT2Nvme);
+        entry.address = loc.offset;
+        entry.segment_id = loc.segment_id;
+        t2_eviction_->on_insert(key, opts.recompute_cost, key.chunk_index);
+    }
+
+    index_->upsert(key, entry);
+    checkpoint_->mark_dirty();
+    evict_if_needed();
 
     logger_->period_stats().puts.fetch_add(1, std::memory_order_relaxed);
     logger_->debug("put_accepted",
